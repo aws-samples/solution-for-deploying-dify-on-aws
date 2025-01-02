@@ -76,6 +76,32 @@ export class LangfuseHelmStack extends cdk.Stack {
       namespace: 'langfuse',
       values: {
         replicaCount: 2,
+        clickhouse: {
+          enabled: true,
+          auth: {
+            username: "default",
+            password: "clickhouse"  // 这里建议使用从 context 获取的密码
+          },
+          shards: 1,
+          replicas: 1,
+          resources: {
+            requests: {
+              memory: "2Gi",
+              cpu: "1000m"
+            },
+            limits: {
+              memory: "3Gi",
+              cpu: "1500m"
+            }
+          }
+        },
+        minio: {
+          enabled: true,
+          auth: {
+            rootUser: "minio",
+            rootPassword: "minio123"  // 这里建议使用从 context 获取的密码
+          }
+        },
         langfuse: {
           port: 3000,
           nodeEnv: 'production',
@@ -83,7 +109,7 @@ export class LangfuseHelmStack extends cdk.Stack {
             healthcheckBasePath: ""
           },
           nextauth: {
-            url: `http://localhost:3000`,
+            url: "${props.cluster.clusterEndpoint}",  // 使用集群端点作为基础URL
             secret: nextAuthSecret
           },
           salt: salt,
@@ -94,6 +120,18 @@ export class LangfuseHelmStack extends cdk.Stack {
             { 
               name: 'DATABASE_URL', 
               value: `postgresql://postgres:${dbPassword}@${props.dbEndpoint}:${props.dbPort}/postgres?schema=public` 
+            },
+            {
+              name: 'CLICKHOUSE_URL',
+              value: 'clickhouse://langfuse-clickhouse:9000'
+            },
+            {
+              name: 'CLICKHOUSE_USER',
+              value: 'default'
+            },
+            {
+              name: 'CLICKHOUSE_PASSWORD',
+              value: 'clickhouse'  // 这里建议使用从 context 获取的密码
             }
           ],
           extraContainers: [],

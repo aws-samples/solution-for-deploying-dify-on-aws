@@ -70,7 +70,7 @@ const difyHelmStack = new DifyHelmStack(app, 'DifyStack', {
     openSearchEndpoint: openSearchEndpoint,
 
 });
-
+/*
 // 3. deploy langfuse helm
 const langfuseHelmStack = new LangfuseHelmStack(app, 'LangfuseStack', {
     cluster: eksStack.cluster,
@@ -78,7 +78,7 @@ const langfuseHelmStack = new LangfuseHelmStack(app, 'LangfuseStack', {
     // RDS
     dbEndpoint: dbEndpoint,
     dbPort: dbPort
-});
+});*/
 
 // 设置 difyHelmStack 依赖于 eksStack
 difyHelmStack.addDependency(eksStack);
@@ -86,6 +86,7 @@ difyHelmStack.addDependency(rdsStack);
 difyHelmStack.addDependency(redisClusterStack);
 difyHelmStack.addDependency(s3Stack);
 difyHelmStack.addDependency(openSearchStack);
-
+/*
 langfuseHelmStack.addDependency(eksStack);
 langfuseHelmStack.addDependency(rdsStack);
+*/

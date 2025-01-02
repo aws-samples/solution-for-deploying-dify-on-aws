@@ -4,3 +4,5 @@ dify-cdk/bin/dify-helm-stack_oregon.ts
 dify-cdk/bin/dify-helm-stack_original.ts
 dify-cdk/cdk.out/
 dify-cdk/node_modules/
+.DS_Store
+dify-cdk/bin/dify-helm-stack-tokyo.ts

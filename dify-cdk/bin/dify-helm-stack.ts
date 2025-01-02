@@ -126,7 +126,7 @@ export class DifyHelmStack extends cdk.Stack {
           host: '',
           port: '',
           enableTLS: false,
-          image: { tag: '0.12.1' },
+          image: { tag: '0.14.2' },
           edition: 'SELF_HOSTED',
           storageType: 's3',
           extraEnvs: [],
@@ -367,7 +367,7 @@ export class DifyHelmStack extends cdk.Stack {
             timeoutSeconds: 10,
             periodSeconds: 5,
             successThreshold: 1,
-            failureThreshold: 10
+            failureThreshold: 30       // 给予充足的启动时间
           }
         },
 
@@ -389,8 +389,30 @@ export class DifyHelmStack extends cdk.Stack {
           autoscaling: {
             enabled: true,
             minReplicas: 2,
-            maxReplicas: 100,
-            targetCPUUtilizationPercentage: 80
+            maxReplicas: 10,  // 降低最大副本数
+            targetCPUUtilizationPercentage: 80,
+            behavior: {  // 添加扩缩容行为控制
+              scaleUp: {
+                stabilizationWindowSeconds: 300,  // 5分钟的稳定窗口
+                policies: [
+                  {
+                    type: 'Pods',
+                    value: 2,  // 每次最多增加2个pod
+                    periodSeconds: 60
+                  }
+                ]
+              },
+              scaleDown: {
+                stabilizationWindowSeconds: 300,
+                policies: [
+                  {
+                    type: 'Pods',
+                    value: 1,  // 每次最多减少1个pod
+                    periodSeconds: 60
+                  }
+                ]
+              }
+            }
           },
 
           livenessProbe: {
