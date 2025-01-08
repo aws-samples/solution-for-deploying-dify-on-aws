@@ -126,7 +126,7 @@ export class DifyHelmStack extends cdk.Stack {
           host: '',
           port: '',
           enableTLS: false,
-          image: { tag: '0.14.2' },
+          image: { tag: '0.15.0' },
           edition: 'SELF_HOSTED',
           storageType: 's3',
           extraEnvs: [],
