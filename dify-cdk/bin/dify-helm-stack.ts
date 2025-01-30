@@ -126,7 +126,7 @@ export class DifyHelmStack extends cdk.Stack {
           host: '',
           port: '',
           enableTLS: false,
-          image: { tag: '0.15.0' },
+          image: { tag: '0.15.2' },
           edition: 'SELF_HOSTED',
           storageType: 's3',
           extraEnvs: [],
@@ -176,7 +176,7 @@ export class DifyHelmStack extends cdk.Stack {
             'alb.ingress.kubernetes.io/scheme': 'internet-facing',
             'alb.ingress.kubernetes.io/target-type': 'ip',
             'alb.ingress.kubernetes.io/listen-ports': '[{"HTTP": 80}]'
-          },
+            },
           hosts: [{
             host: '',
             paths: [

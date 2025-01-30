@@ -44,7 +44,7 @@ export class RDSStack extends cdk.Stack {
       clusterIdentifier: 'dify-db',
       defaultDatabaseName: 'dify',
       serverlessV2MaxCapacity: 4,
-      serverlessV2MinCapacity: 0,
+      serverlessV2MinCapacity: 0.5,
       securityGroups: [dbSecurityGroup],
       writer: rds.ClusterInstance.serverlessV2('writer', {
         instanceIdentifier: 'dify-db-writer',
