@@ -61,6 +61,29 @@ export class EKSStack extends cdk.Stack {
       ],
     });
 
+    // 添加EBS卷操作权限的内联策略
+    const ebsPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'ec2:CreateVolume',
+        'ec2:DeleteVolume',
+        'ec2:AttachVolume',
+        'ec2:DetachVolume',
+        'ec2:DescribeVolumes',
+        'ec2:DescribeVolumesModifications',
+        'ec2:ModifyVolume',
+        'ec2:DescribeInstances',
+        'ec2:CreateSnapshot',
+        'ec2:DeleteSnapshot',
+        'ec2:DescribeSnapshots',
+        'ec2:CreateTags',
+        'ec2:DeleteTags'
+      ],
+      resources: ['*']
+    });
+    
+    nodeGroupRole.addToPolicy(ebsPolicy);
+
     const invokeSagemakerPolicy = new iam.PolicyStatement({
       actions: ['sagemaker:InvokeEndpoint'],
       resources: ['*'], 
@@ -71,16 +94,285 @@ export class EKSStack extends cdk.Stack {
     // 异步获取可用的实例类型
     (async () => {
       const nodeInstanceType = await getAvailableInstanceType();
-      console.log(`EKS Using instance type: ${nodeInstanceType}`);
+    console.log(`EKS Using instance type: ${nodeInstanceType}`);
 
-      this.cluster.addNodegroupCapacity('NodeGroup', {
-        instanceTypes: [new ec2.InstanceType(nodeInstanceType)],
-        minSize: this.node.tryGetContext('NodeGroupMinSize') || 3,
-        desiredSize: this.node.tryGetContext('NodeGroupDesiredSize') || 3,
-        maxSize: this.node.tryGetContext('NodeGroupMaxSize') || 10,
-        nodeRole: nodeGroupRole,
-      });
+    this.cluster.addNodegroupCapacity('NodeGroup', {
+      instanceTypes: [new ec2.InstanceType(nodeInstanceType)],
+      minSize: this.node.tryGetContext('NodeGroupMinSize') || 3,
+      desiredSize: this.node.tryGetContext('NodeGroupDesiredSize') || 3,
+      maxSize: this.node.tryGetContext('NodeGroupMaxSize') || 10,
+      nodeRole: nodeGroupRole,
+    });
     })();
+
+    // 添加 AWS EBS CSI Driver 服务账户
+    const ebsCSIServiceAccount = this.cluster.addServiceAccount('ebs-csi-controller-sa', {
+      name: 'ebs-csi-controller-sa',
+      namespace: 'kube-system',
+    });
+
+    // 添加 EBS CSI Controller 权限
+    ebsCSIServiceAccount.role.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonEBSCSIDriverPolicy')
+    );
+
+    // 创建 CSIDriver 对象
+    this.cluster.addManifest('ebs-csi-driver', {
+      apiVersion: 'storage.k8s.io/v1',
+      kind: 'CSIDriver',
+      metadata: {
+        name: 'ebs.csi.aws.com'
+      },
+      spec: {
+        attachRequired: true,
+        podInfoOnMount: false,
+        volumeLifecycleModes: ['Persistent']
+      }
+    });
+
+    // 创建 gp2 StorageClass
+    this.cluster.addManifest('gp2-storage-class', {
+      apiVersion: 'storage.k8s.io/v1',
+      kind: 'StorageClass',
+      metadata: {
+        name: 'gp2',
+        annotations: {
+          'storageclass.kubernetes.io/is-default-class': 'true'
+        }
+      },
+      provisioner: 'ebs.csi.aws.com',
+      volumeBindingMode: 'Immediate',  // 修改为立即绑定模式
+      parameters: {
+        type: 'gp2',
+        fsType: 'ext4'
+      }
+    });
+
+    // 创建专用于插件系统的StorageClass
+    this.cluster.addManifest('plugin-storage-class', {
+      apiVersion: 'storage.k8s.io/v1',
+      kind: 'StorageClass',
+      metadata: {
+        name: 'plugin-storage'
+      },
+      provisioner: 'ebs.csi.aws.com',
+      volumeBindingMode: 'Immediate',
+      parameters: {
+        type: 'gp2',
+        fsType: 'ext4'
+      }
+    });
+
+    // 配置 EBS CSI Controller Deployment
+    this.cluster.addManifest('ebs-csi-controller', {
+      apiVersion: 'apps/v1',
+      kind: 'Deployment',
+      metadata: {
+        name: 'ebs-csi-controller',
+        namespace: 'kube-system'
+      },
+      spec: {
+        replicas: 2,
+        selector: {
+          matchLabels: {
+            app: 'ebs-csi-controller'
+          }
+        },
+        template: {
+          metadata: {
+            labels: {
+              app: 'ebs-csi-controller'
+            }
+          },
+          spec: {
+            serviceAccountName: 'ebs-csi-controller-sa',
+            priorityClassName: 'system-cluster-critical',
+            containers: [
+              {
+                name: 'ebs-plugin',
+                image: 'k8s.gcr.io/provider-aws/aws-ebs-csi-driver:v1.8.0',
+                args: [
+                  '--endpoint=$(CSI_ENDPOINT)',
+                  '--logtostderr',
+                  '--v=5'
+                ],
+                env: [
+                  {
+                    name: 'CSI_ENDPOINT',
+                    value: 'unix:///var/lib/csi/sockets/pluginproxy/csi.sock'
+                  }
+                ],
+                volumeMounts: [
+                  {
+                    name: 'socket-dir',
+                    mountPath: '/var/lib/csi/sockets/pluginproxy/'
+                  }
+                ]
+              },
+              {
+                name: 'csi-provisioner',
+                image: 'k8s.gcr.io/sig-storage/csi-provisioner:v3.1.0',
+                args: [
+                  '--csi-address=$(ADDRESS)',
+                  '--v=5',
+                  '--feature-gates=Topology=true',
+                  '--extra-create-metadata'
+                ],
+                env: [
+                  {
+                    name: 'ADDRESS',
+                    value: '/var/lib/csi/sockets/pluginproxy/csi.sock'
+                  }
+                ],
+                volumeMounts: [
+                  {
+                    name: 'socket-dir',
+                    mountPath: '/var/lib/csi/sockets/pluginproxy/'
+                  }
+                ]
+              },
+              {
+                name: 'csi-attacher',
+                image: 'k8s.gcr.io/sig-storage/csi-attacher:v3.3.0',
+                args: [
+                  '--csi-address=$(ADDRESS)',
+                  '--v=5'
+                ],
+                env: [
+                  {
+                    name: 'ADDRESS',
+                    value: '/var/lib/csi/sockets/pluginproxy/csi.sock'
+                  }
+                ],
+                volumeMounts: [
+                  {
+                    name: 'socket-dir',
+                    mountPath: '/var/lib/csi/sockets/pluginproxy/'
+                  }
+                ]
+              }
+            ],
+            volumes: [
+              {
+                name: 'socket-dir',
+                emptyDir: {}
+              }
+            ]
+          }
+        }
+      }
+    });
+
+    // 配置 EBS CSI Node DaemonSet
+    this.cluster.addManifest('ebs-csi-node', {
+      apiVersion: 'apps/v1',
+      kind: 'DaemonSet',
+      metadata: {
+        name: 'ebs-csi-node',
+        namespace: 'kube-system'
+      },
+      spec: {
+        selector: {
+          matchLabels: {
+            app: 'ebs-csi-node'
+          }
+        },
+        template: {
+          metadata: {
+            labels: {
+              app: 'ebs-csi-node'
+            }
+          },
+          spec: {
+            hostNetwork: true,
+            containers: [
+              {
+                name: 'ebs-plugin',
+                image: 'k8s.gcr.io/provider-aws/aws-ebs-csi-driver:v1.8.0',
+                args: [
+                  '--endpoint=$(CSI_ENDPOINT)',
+                  '--logtostderr',
+                  '--v=5'
+                ],
+                env: [
+                  {
+                    name: 'CSI_ENDPOINT',
+                    value: 'unix:/csi/csi.sock'
+                  }
+                ],
+                // 添加特权模式配置，允许双向挂载
+                securityContext: {
+                  privileged: true
+                },
+                volumeMounts: [
+                  {
+                    name: 'kubelet-dir',
+                    mountPath: '/var/lib/kubelet',
+                    mountPropagation: 'Bidirectional'
+                  },
+                  {
+                    name: 'plugin-dir',
+                    mountPath: '/csi'
+                  }
+                ]
+              },
+              {
+                name: 'node-driver-registrar',
+                image: 'k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.3.0',
+                args: [
+                  '--csi-address=$(ADDRESS)',
+                  '--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)',
+                  '--v=5'
+                ],
+                env: [
+                  {
+                    name: 'ADDRESS',
+                    value: '/csi/csi.sock'
+                  },
+                  {
+                    name: 'DRIVER_REG_SOCK_PATH',
+                    value: '/var/lib/kubelet/plugins/ebs.csi.aws.com/csi.sock'
+                  }
+                ],
+                volumeMounts: [
+                  {
+                    name: 'plugin-dir',
+                    mountPath: '/csi'
+                  },
+                  {
+                    name: 'registration-dir',
+                    mountPath: '/registration'
+                  }
+                ]
+              }
+            ],
+            volumes: [
+              {
+                name: 'kubelet-dir',
+                hostPath: {
+                  path: '/var/lib/kubelet',
+                  type: 'Directory'
+                }
+              },
+              {
+                name: 'plugin-dir',
+                hostPath: {
+                  path: '/var/lib/kubelet/plugins/ebs.csi.aws.com/',
+                  type: 'DirectoryOrCreate'
+                }
+              },
+              {
+                name: 'registration-dir',
+                hostPath: {
+                  path: '/var/lib/kubelet/plugins_registry/',
+                  type: 'Directory'
+                }
+              }
+            ]
+          }
+        }
+      }
+    });
 
     // Deploy ALBC if it doesn't exist
     const _ALBC = new ALBCDeploymentStack(this, 'ALBCDeploymentStack', {
