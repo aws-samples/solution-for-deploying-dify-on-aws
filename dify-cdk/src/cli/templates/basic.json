@@ -1,0 +1,70 @@
+{
+  "isChinaRegion": false,
+  "deployLangfuse": false,
+  "dify": {
+    "version": "1.4.2"
+  },
+  "network": {},
+  "domain": {
+    "useCloudfront": false
+  },
+  "cluster": {
+    "version": "1.31",
+    "vpcSubnetIds": [],
+    "managedNodeGroups": {
+      "app": {
+        "desiredSize": 3,
+        "minSize": 1,
+        "maxSize": 6,
+        "instanceType": "c6g.large",
+        "diskSize": 100,
+        "workerNodeSubnetIds": []
+      }
+    },
+    "eksClusterName": "dify-eks"
+  },
+  "s3": {
+    "removeWhenDestroyed": false
+  },
+  "postgresSQL": {
+    "postgresFullVersion": "16.4",
+    "postgresMajorVersion": "16",
+    "instanceType": "db.m6g.large",
+    "dbName": "dify",
+    "dbCredentialUsername": "postgres",
+    "dbCredentialPassword": "",
+    "backupRetention": 0,
+    "storageSize": 512,
+    "removeWhenDestroyed": false,
+    "subnetIds": [],
+    "multiAz": {
+      "enabled": false,
+      "subnetGroupName": ""
+    }
+  },
+  "redis": {
+    "engineVersion": "7.0",
+    "nodeType": "cache.m6g.large",
+    "readReplicas": 1,
+    "subnetIds": [],
+    "multiAZ": {
+      "enabled": false,
+      "subnetGroupName": ""
+    }
+  },
+  "openSearch": {
+    "enabled": true,
+    "masterUserName": "admin",
+    "masterUserPassword": "",
+    "multiAz": {
+      "enabled": false,
+      "azCount": 2
+    },
+    "subnetIds": [],
+    "capacity": {
+      "dataNodes": 2,
+      "dataNodeInstanceType": "r6g.large.search"
+    },
+    "dataNodeSize": 100
+  }
+}

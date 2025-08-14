@@ -1,0 +1,114 @@
+{
+  "isChinaRegion": false,
+  "deployLangfuse": false,
+  "dify": {
+    "version": "1.7.2",
+    "pluginDaemon": {
+      "enabled": true,
+      "storageSize": "10Gi"
+    },
+    "migration": {
+      "enabled": false,
+      "skipPluginMigration": true
+    }
+  },
+  "network": {
+    "useExistingVpc": false,
+    "vpcCidr": "10.0.0.0/16",
+    "maxAzs": 2
+  },
+  "domain": {
+    "useCloudfront": true,
+    "domainName": "",
+    "hostedZoneId": "",
+    "cloudfront": {
+      "enabled": true,
+      "domainName": "",
+      "aliases": [],
+      "priceClass": "PriceClass_200",
+      "waf": {
+        "enabled": false,
+        "rateLimit": 5000,
+        "geoRestriction": {
+          "restrictionType": "blacklist",
+          "locations": []
+        }
+      },
+      "cachePolicy": {
+        "defaultTTL": 300,
+        "maxTTL": 86400,
+        "minTTL": 0
+      },
+      "logging": {
+        "enabled": false,
+        "prefix": "cloudfront-logs/"
+      },
+      "originShield": {
+        "enabled": false,
+        "region": "ap-northeast-1"
+      }
+    }
+  },
+  "cluster": {
+    "useExistingCluster": false,
+    "clusterName": "dify-eks",
+    "version": "1.33",
+    "vpcSubnetIds": [],
+    "managedNodeGroups": {
+      "app": {
+        "desiredSize": 3,
+        "minSize": 1,
+        "maxSize": 4,
+        "instanceType": "m8g.large",
+        "diskSize": 100,
+        "workerNodeSubnetIds": []
+      }
+    },
+    "eksClusterName": "dify-eks"
+  },
+  "s3": {
+    "removeWhenDestroyed": true,
+    "useAccessKeyAuth": false
+  },
+  "postgresSQL": {
+    "postgresFullVersion": "16.4",
+    "postgresMajorVersion": "16",
+    "instanceType": "db.t4g.medium",
+    "dbName": "dify",
+    "dbCredentialUsername": "postgres",
+    "dbCredentialPassword": "Dify.Postgres.2024!",
+    "backupRetention": 0,
+    "storageSize": 100,
+    "removeWhenDestroyed": true,
+    "subnetIds": [],
+    "multiAz": {
+      "enabled": false,
+      "subnetGroupName": ""
+    }
+  },
+  "redis": {
+    "engineVersion": "7.0",
+    "nodeType": "cache.t4g.micro",
+    "readReplicas": 0,
+    "subnetIds": [],
+    "multiAZ": {
+      "enabled": false,
+      "subnetGroupName": ""
+    }
+  },
+  "openSearch": {
+    "enabled": false,
+    "masterUserName": "admin",
+    "masterUserPassword": "Dify.OpenSearch.2024!",
+    "multiAz": {
+      "enabled": false,
+      "azCount": 1
+    },
+    "subnetIds": [],
+    "capacity": {
+      "dataNodes": 1,
+      "dataNodeInstanceType": "t3g.small.search"
+    },
+    "dataNodeSize": 20
+  }
+}

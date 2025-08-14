@@ -1,8 +1,35 @@
-dify-cdk/cdk_oregon.json
-dify-cdk/cdk_original.json
-dify-cdk/bin/dify-helm-stack_oregon.ts
-dify-cdk/bin/dify-helm-stack_original.ts
-dify-cdk/cdk.out/
-dify-cdk/node_modules/
+# 编译生成的文件
+*.js
+!jest.config.js
+!test-config.js
+*.d.ts
+
+# CDK 输出
+cdk.out/
+.cdk.staging/
+
+# 依赖
+node_modules/
+
+# 环境和配置
+.env
+.env.local
+*.log
+
+# 备份文件
+*.backup
+*.bak
+
+# IDE
+.vscode/
+.idea/
 .DS_Store
-dify-cdk/bin/dify-helm-stack-tokyo.ts
+
+# 临时文件
+*.tmp
+*.temp
+.cache/
+
+# 操作系统生成的文件
+Thumbs.db
+.DS_Store

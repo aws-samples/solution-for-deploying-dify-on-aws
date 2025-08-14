@@ -20,13 +20,16 @@
     "inlineSources": true,
     "experimentalDecorators": true,
     "strictPropertyInitialization": false,
+    "esModuleInterop": true,
     "typeRoots": [
       "./node_modules/@types"
     ],
     "types": ["node"]
   },
   "include": [
-    "lib/**/*.ts"
+    "bin/**/*.ts",
+    "lib/**/*.ts",
+    "src/**/*.ts"
   ],
   "exclude": [
     "node_modules",
