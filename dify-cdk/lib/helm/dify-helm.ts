@@ -19,6 +19,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { IRole } from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { SystemConfig } from '../../src/config';
+import { DatabaseMigrationConstruct } from '../database/db-migration-construct';
 
 // GCR Registry for China region - Updated to match dify-cdk-cn implementation
 const GCR_REGISTRY = '048912060910.dkr.ecr.cn-northwest-1.amazonaws.com.cn/dockerhub/';
@@ -124,9 +125,59 @@ export class DifyHelmConstruct extends Construct {
     const s3Domain = props.config.isChinaRegion ? 'amazonaws.com.cn' : 'amazonaws.com';
     
     // Get Dify version
-    const difyVersion = props.config.dify.version ;
+    const difyVersion = props.config.dify.version || '1.7.2';
 
-    // Dify Helm configuration - simplified like the old version
+    // 创建数据库迁移（如果启用）
+    let dbMigration: DatabaseMigrationConstruct | undefined;
+    if (props.config.dify.dbMigration?.enabled) {
+      console.log('🔄 启用数据库自动迁移...');
+      
+      // 创建数据库密码Secret
+      const dbSecretName = 'dify-db-credentials';
+      const dbSecretManifest = new eks.KubernetesManifest(this, 'db-secret', {
+        cluster: props.cluster,
+        manifest: [{
+          apiVersion: 'v1',
+          kind: 'Secret',
+          metadata: {
+            name: dbSecretName,
+            namespace,
+          },
+          type: 'Opaque',
+          stringData: {
+            'password': dbPassword,
+            'username': props.config.postgresSQL.dbCredentialUsername || 'postgres',
+          },
+        }],
+      });
+      
+      // 确保Secret在namespace之后创建
+      dbSecretManifest.node.addDependency(ns);
+      
+      // 创建数据库迁移构造器
+      dbMigration = new DatabaseMigrationConstruct(this, 'DbMigration', {
+        config: props.config,
+        cluster: props.cluster,
+        namespace,
+        database: {
+          endpoint: props.dbEndpoint,
+          port: props.dbPort,
+          username: props.config.postgresSQL.dbCredentialUsername || 'postgres',
+          secretName: dbSecretName,
+          dbName: props.config.postgresSQL.dbName || 'dify',
+        },
+        serviceAccountName: 'dify',
+        difyVersion: difyVersion,
+        imageRegistry,
+      });
+      
+      // 确保迁移在Secret之后创建
+      dbMigration.node.addDependency(dbSecretManifest);
+      
+      console.log('✅ 数据库迁移配置完成');
+    }
+
+    // Dify Helm configuration - minimized
     const difyHelmChart = new eks.HelmChart(this, 'DifyHelmChart', {
       cluster: props.cluster,
       chart: 'dify',
@@ -143,12 +194,11 @@ export class DifyHelmConstruct extends Construct {
           image: { tag: difyVersion },
           edition: 'SELF_HOSTED',
           storageType: 's3',
-          extraEnvs: [],
           extraBackendEnvs: [
             { name: 'SECRET_KEY', value: secretKey },
             { name: 'LOG_LEVEL', value: 'INFO' },
             
-            // RDS Postgres
+            // Database
             { name: 'DB_USERNAME', value: props.config.postgresSQL.dbCredentialUsername || 'postgres' },
             { name: 'DB_PASSWORD', value: dbPassword },
             { name: 'DB_HOST', value: props.dbEndpoint },
@@ -172,8 +222,6 @@ export class DifyHelmConstruct extends Construct {
             { name: 'REDIS_USERNAME', value: '' },
             { name: 'REDIS_PASSWORD', value: '' },
             { name: 'REDIS_USE_SSL', value: props.config.isChinaRegion ? 'true' : 'false' },
-            
-            // CELERY_BROKER
             { name: 'CELERY_BROKER_URL', value: `redis://:@${props.redisEndpoint}:${props.redisPort}/1` },
             { name: 'BROKER_USE_SSL', value: props.config.isChinaRegion ? 'true' : 'false' },
             
@@ -183,7 +231,6 @@ export class DifyHelmConstruct extends Construct {
             { name: 'S3_REGION', value: Aws.REGION },
             { name: 'S3_USE_AWS_MANAGED_IAM', value: 'true' },
           ],
-          labels: []
         },
 
         ingress: {
@@ -199,7 +246,7 @@ export class DifyHelmConstruct extends Construct {
         },
 
         serviceAccount: {
-          create: true, // 让Helm创建ServiceAccount
+          create: true,
           annotations: {
             'eks.amazonaws.com/role-arn': difyServiceAccountRole.roleArn,
           },
@@ -207,61 +254,14 @@ export class DifyHelmConstruct extends Construct {
         },
 
         frontend: {
-          replicaCount: 1,
           image: {
             repository: `${imageRegistry}langgenius/dify-web`,
-            pullPolicy: 'IfNotPresent',
-            tag: '',
-          },
-          envs: [],
-          imagePullSecrets: [],
-          podAnnotations: {},
-          podSecurityContext: {},
-          securityContext: {},
-          service: {
-            type: 'ClusterIP',
-            port: 80,
-          },
-          containerPort: 3000,
-          resources: {},
-          autoscaling: {
-            enabled: false,
-            minReplicas: 1,
-            maxReplicas: 100,
-            targetCPUUtilizationPercentage: 80,
-          },
-          livenessProbe: {
-            httpGet: {
-              path: '/apps',
-              port: 'http',
-              httpHeaders: [{ name: 'accept-language', value: 'en' }],
-            },
-            initialDelaySeconds: 3,
-            timeoutSeconds: 5,
-            periodSeconds: 30,
-            successThreshold: 1,
-            failureThreshold: 2,
-          },
-          readinessProbe: {
-            httpGet: {
-              path: '/apps',
-              port: 'http',
-              httpHeaders: [{ name: 'accept-language', value: 'en' }],
-            },
-            initialDelaySeconds: 3,
-            timeoutSeconds: 5,
-            periodSeconds: 30,
-            successThreshold: 1,
-            failureThreshold: 2,
           },
         },
 
         api: {
-          replicaCount: 1,
           image: {
             repository: `${imageRegistry}langgenius/dify-api`,
-            pullPolicy: 'IfNotPresent',
-            tag: '',
           },
           envs: [
             { name: 'CODE_MAX_NUMBER', value: '9223372036854775807' },
@@ -272,104 +272,22 @@ export class DifyHelmConstruct extends Construct {
             { name: 'CODE_MAX_OBJECT_ARRAY_LENGTH', value: '30' },
             { name: 'CODE_MAX_NUMBER_ARRAY_LENGTH', value: '1000' },
           ],
-          podAnnotations: {},
-          podSecurityContext: {},
-          securityContext: {},
-          service: {
-            type: 'ClusterIP',
-            port: 80,
-          },
-          containerPort: 5001,
           resources: {
             limits: { cpu: '2', memory: '2Gi' },
             requests: { cpu: '1', memory: '1Gi' },
           },
-          livenessProbe: {
-            httpGet: {
-              path: '/health',
-              port: 'http',
-            },
-            initialDelaySeconds: 30,
-            timeoutSeconds: 5,
-            periodSeconds: 30,
-            successThreshold: 1,
-            failureThreshold: 2,
-          },
-          readinessProbe: {
-            httpGet: {
-              path: '/health',
-              port: 'http',
-            },
-            initialDelaySeconds: 10,
-            timeoutSeconds: 5,
-            periodSeconds: 5,
-            successThreshold: 1,
-            failureThreshold: 10,
-          },
         },
 
         worker: {
-          replicaCount: 1,
           image: {
             repository: `${imageRegistry}langgenius/dify-api`,
-            pullPolicy: 'IfNotPresent',
-            tag: '',
           },
-          podAnnotations: {},
-          podSecurityContext: {},
-          securityContext: {},
-          resources: {},
-          autoscaling: {
-            enabled: false,
-            minReplicas: 1,
-            maxReplicas: 100,
-            targetCPUUtilizationPercentage: 80,
-          },
-          livenessProbe: {},
-          readinessProbe: {},
         },
 
         sandbox: {
-          replicaCount: 1,
-          apiKey: 'dify-sandbox',
-          apiKeySecret: '',
           image: {
             repository: `${imageRegistry}langgenius/dify-sandbox`,
-            pullPolicy: 'IfNotPresent',
             tag: 'latest',
-          },
-          config: {
-            python_requirements: '',
-          },
-          envs: [
-            { name: 'GIN_MODE', value: 'release' },
-            { name: 'WORKER_TIMEOUT', value: '15' },
-          ],
-          service: {
-            type: 'ClusterIP',
-            port: 80,
-          },
-          containerPort: 8194,
-          resources: {},
-          readinessProbe: {
-            tcpSocket: {
-              port: 'http',
-            },
-            initialDelaySeconds: 1,
-            timeoutSeconds: 5,
-            periodSeconds: 5,
-            successThreshold: 1,
-            failureThreshold: 10,
-          },
-          livenessProbe: {
-            tcpSocket: {
-              port: 'http',
-            },
-            initialDelaySeconds: 30,
-            timeoutSeconds: 5,
-            periodSeconds: 30,
-            successThreshold: 1,
-            failureThreshold: 2,
           },
         },
 
@@ -389,6 +307,11 @@ export class DifyHelmConstruct extends Construct {
 
     // Add dependencies
     difyHelmChart.node.addDependency(ns);
+    
+    // 如果启用了数据库迁移，确保Helm Chart在迁移之后部署
+    if (dbMigration) {
+      difyHelmChart.node.addDependency(dbMigration);
+    }
 
     // 纯Ingress模式 - ALB完全由AWS Load Balancer Controller管理
     console.log('📝 使用纯Ingress模式，ALB将由AWS Load Balancer Controller自动管理');

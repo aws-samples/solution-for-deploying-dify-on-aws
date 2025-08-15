@@ -10,6 +10,9 @@
     "migration": {
       "enabled": false,
       "skipPluginMigration": true
+    },
+    "dbMigration": {
+      "enabled": true
     }
   },
   "network": {

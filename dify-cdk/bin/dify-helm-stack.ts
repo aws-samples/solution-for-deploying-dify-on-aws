@@ -53,7 +53,7 @@ export class DifyHelmStack extends cdk.Stack {
       dbEndpoint: props.dbEndpoint,
       dbPort: props.dbPort,
       dbSecretArn: props.dbSecretArn,
-      dbPassword: props.dbPassword || 'Dify.Postgres.2024!', // 使用配置的密码或默认值
+      dbPassword: props.dbPassword, 
       s3BucketName: props.s3BucketName,
       redisEndpoint: props.redisEndpoint,
       redisPort: props.redisPort,

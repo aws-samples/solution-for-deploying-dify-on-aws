@@ -33,3 +33,4 @@ node_modules/
 # 操作系统生成的文件
 Thumbs.db
 .DS_Store
+dify-cdk/deploy-tokyo.sh

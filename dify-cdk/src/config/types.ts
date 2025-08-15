@@ -31,6 +31,9 @@ export interface DifyConfig {
     skipPluginMigration?: boolean;  // 跳过插件迁移（适用于全新安装）
     marketplaceUrl?: string;     // 插件市场地址
   };
+  dbMigration?: {
+    enabled?: boolean;           // 启用数据库自动迁移
+  };
 }
 
 export interface DomainConfig {
