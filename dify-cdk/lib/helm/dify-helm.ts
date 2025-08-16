@@ -221,6 +221,7 @@ export class DifyHelmConstruct extends Construct {
           image: { tag: difyVersion },
           edition: 'SELF_HOSTED',
           storageType: 's3',
+          // 只放入真正所有后端组件都需要的通用环境变量
           extraBackendEnvs: [
             { name: 'SECRET_KEY', value: secretKey },
             { name: 'LOG_LEVEL', value: 'INFO' },
@@ -296,6 +297,11 @@ export class DifyHelmConstruct extends Construct {
             repository: `${imageRegistry}langgenius/dify-api`,
           },
           envs: [
+            // Sandbox configuration (特定于 API 组件)
+            { name: 'CODE_EXECUTION_ENDPOINT', value: 'http://dify-sandbox:80' },
+            { name: 'CODE_EXECUTION_API_KEY', value: 'dify-sandbox' },
+            
+            // Code execution limits
             { name: 'CODE_MAX_NUMBER', value: '9223372036854775807' },
             { name: 'CODE_MIN_NUMBER', value: '-9223372036854775808' },
             { name: 'CODE_MAX_STRING_LENGTH', value: '80000' },
@@ -303,6 +309,11 @@ export class DifyHelmConstruct extends Construct {
             { name: 'CODE_MAX_STRING_ARRAY_LENGTH', value: '30' },
             { name: 'CODE_MAX_OBJECT_ARRAY_LENGTH', value: '30' },
             { name: 'CODE_MAX_NUMBER_ARRAY_LENGTH', value: '1000' },
+            { name: 'CODE_MAX_DEPTH', value: '5' },
+            
+            // SSRF Proxy configuration (if needed)
+            { name: 'SSRF_PROXY_HTTP_URL', value: 'http://ssrf:3128' },
+            { name: 'SSRF_PROXY_HTTPS_URL', value: 'http://ssrf:3128' },
           ],
           resources: {
             limits: { cpu: '2', memory: '2Gi' },
@@ -318,6 +329,10 @@ export class DifyHelmConstruct extends Construct {
           image: {
             repository: `${imageRegistry}langgenius/dify-api`,
           },
+          envs: [
+            // Worker 特定的环境变量（如果有需要）
+            // 目前 worker 使用和 API 相同的镜像，大部分配置通过 global.extraBackendEnvs 继承
+          ],
         },
         
         sandbox: {
@@ -341,6 +356,21 @@ export class DifyHelmConstruct extends Construct {
         
         minio: {
           embedded: false,
+        },
+        
+        // Plugin Daemon configuration
+        pluginDaemon: {
+          enabled: true,
+          envs: [
+            // Plugin Daemon 特定的环境变量
+            { name: 'DB_DATABASE', value: 'dify_plugin' },
+            { name: 'SERVER_PORT', value: '5002' },
+            { name: 'MAX_PLUGIN_PACKAGE_SIZE', value: '52428800' },
+            { name: 'PPROF_ENABLED', value: 'false' },
+            { name: 'FORCE_VERIFYING_SIGNATURE', value: 'true' },
+            { name: 'PLUGIN_REMOTE_INSTALLING_HOST', value: '0.0.0.0' },
+            { name: 'PLUGIN_REMOTE_INSTALLING_PORT', value: '5003' },
+          ],
         },
       },
     });

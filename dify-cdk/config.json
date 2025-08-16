@@ -21,7 +21,7 @@
     "maxAzs": 2
   },
   "domain": {
-    "useCloudfront": false,
+    "useCloudfront": true,
     "domainName": "",
     "hostedZoneId": "",
     "cloudfront": {

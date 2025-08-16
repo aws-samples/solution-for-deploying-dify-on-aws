@@ -177,24 +177,6 @@ export class DifyALBConstruct extends Construct {
 
     this.albDnsName = this.applicationLoadBalancer.loadBalancerDnsName;
 
-    // 输出 ALB DNS
-    new CfnOutput(this, 'ALBDnsName', {
-      value: this.albDnsName,
-      description: 'DNS name of the Application Load Balancer',
-      exportName: `${Stack.of(this).stackName}-alb-dns`,
-    });
-
-    // 输出 Target Group ARNs
-    new CfnOutput(this, 'ApiTargetGroupArn', {
-      value: this.apiTargetGroup.targetGroupArn,
-      description: 'ARN of the API Target Group',
-      exportName: `${Stack.of(this).stackName}-api-tg-arn`,
-    });
-
-    new CfnOutput(this, 'FrontendTargetGroupArn', {
-      value: this.frontendTargetGroup.targetGroupArn,
-      description: 'ARN of the Frontend Target Group',
-      exportName: `${Stack.of(this).stackName}-frontend-tg-arn`,
-    });
+    // 注意：输出将在主Stack中定义，避免重复
   }
 }

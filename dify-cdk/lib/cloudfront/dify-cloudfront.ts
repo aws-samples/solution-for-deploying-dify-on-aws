@@ -16,6 +16,7 @@ import {
   CfnOutput,
   CfnParameter,
   Duration,
+  Fn,
   RemovalPolicy,
   Stack,
   StackProps,
@@ -60,21 +61,25 @@ export class DifyCloudFrontStack extends Stack {
       albDnsName = this.node.tryGetContext('albDnsName');
     }
     
-    // 如果还是没有，创建一个参数
+    // 如果还是没有，尝试从DifyStack的导出值获取
     if (!albDnsName) {
-      const albDnsParam = new CfnParameter(this, 'ALBDnsName', {
-        type: 'String',
-        description: 'The DNS name of the ALB created by Ingress Controller',
-        default: 'MUST_PROVIDE_ALB_DNS_NAME',
-      });
-      albDnsName = albDnsParam.valueAsString;
-      
-      console.log('⚠️ ALB DNS名称需要在部署时提供');
-      console.log('使用以下命令获取ALB DNS:');
-      console.log('kubectl get ingress -n dify -o jsonpath="{.items[0].status.loadBalancer.ingress[0].hostname}"');
-      console.log('然后部署CloudFront:');
-      console.log('cdk deploy DifyCloudFrontStack -c albDnsName=<ALB_DNS> 或');
-      console.log('cdk deploy DifyCloudFrontStack --parameters ALBDnsName=<ALB_DNS>');
+      try {
+        // 尝试从CloudFormation导出值获取 - 使用正确的导出名称
+        albDnsName = Fn.importValue('DifyALBDnsName');
+        console.log('✅ 自动从DifyStack获取ALB DNS');
+      } catch (e) {
+        // 如果导出值不存在，创建一个参数作为后备方案
+        const albDnsParam = new CfnParameter(this, 'ALBDnsName', {
+          type: 'String',
+          description: 'The DNS name of the ALB created by DifyStack',
+          default: 'MUST_PROVIDE_ALB_DNS_NAME',
+        });
+        albDnsName = albDnsParam.valueAsString;
+        
+        console.log('⚠️ 无法自动获取ALB DNS，需要手动提供');
+        console.log('使用以下命令部署CloudFront:');
+        console.log('cdk deploy DifyCloudFrontStack --parameters ALBDnsName=<ALB_DNS>');
+      }
     }
 
     // 获取或创建 Route53 托管区域
