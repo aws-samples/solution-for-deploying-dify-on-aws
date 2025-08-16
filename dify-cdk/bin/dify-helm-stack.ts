@@ -4,6 +4,7 @@ import * as eks from 'aws-cdk-lib/aws-eks';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { DifyHelmConstruct } from '../lib/helm/dify-helm';
+import { DifyALBConstruct } from '../lib/alb/dify-alb-construct';
 import { SystemConfig } from '../src/config';
 
 export interface DifyHelmStackProps extends cdk.StackProps {
@@ -11,7 +12,7 @@ export interface DifyHelmStackProps extends cdk.StackProps {
   cluster: eks.ICluster;
   vpc: ec2.IVpc;
   clusterSecurityGroup: ec2.ISecurityGroup;
-  albSecurityGroupId: string; // 从EKSStack传递过来的ALB安全组ID
+  albSecurityGroupId: string; // 从EKSStack传递过来的ALB安全组ID（现在用于创建ALB）
   dbEndpoint: string;
   dbPort: string;
   dbSecretArn: string;
@@ -28,7 +29,7 @@ export class DifyHelmStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: DifyHelmStackProps) {
     super(scope, id, props);
 
-    console.log('🚀 部署Dify Stack - 纯Ingress架构');
+    console.log('🚀 部署Dify Stack - TargetGroupBinding架构');
     console.log(`📦 使用ALB安全组: ${props.albSecurityGroupId}`);
 
     // 为现有集群创建 Helm 部署角色（如果需要）
@@ -43,39 +44,86 @@ export class DifyHelmStack extends cdk.Stack {
       });
     }
 
-    // 创建 Dify Helm Construct
-    new DifyHelmConstruct(this, 'DifyHelm', {
+    // 创建 ALB（TargetGroupBinding 模式必需）
+    const difyAlb = new DifyALBConstruct(this, 'DifyALB', {
+      vpc: props.vpc,
+      config: props.config,
+      albSecurityGroupId: props.albSecurityGroupId,
+    });
+
+    // 创建 Dify Helm Construct（使用 TargetGroupBinding 模式）
+    const difyHelm = new DifyHelmConstruct(this, 'DifyHelm', {
       config: props.config,
       cluster: props.cluster,
       vpc: props.vpc,
       helmDeployRole,
-      albSecurityGroupId: props.albSecurityGroupId,
+      
+      // 启用 TargetGroupBinding 模式
+      useTargetGroupBinding: true,
+      
+      // 传递 ALB 信息
+      alb: {
+        apiTargetGroupArn: difyAlb.apiTargetGroup.targetGroupArn,
+        frontendTargetGroupArn: difyAlb.frontendTargetGroup.targetGroupArn,
+        dnsName: difyAlb.albDnsName,
+      },
+      
+      // 数据库配置
       dbEndpoint: props.dbEndpoint,
       dbPort: props.dbPort,
       dbSecretArn: props.dbSecretArn,
       dbPassword: props.dbPassword, 
+      
+      // S3 配置
       s3BucketName: props.s3BucketName,
+      
+      // Redis 配置
       redisEndpoint: props.redisEndpoint,
       redisPort: props.redisPort,
+      
+      // OpenSearch 配置
       openSearchEndpoint: props.openSearchEndpoint || '',
       openSearchSecretArn: props.openSearchSecretArn || '',
     });
 
-    // 输出安全组ID供参考
-    new cdk.CfnOutput(this, 'ALBSecurityGroupId', {
-      value: props.albSecurityGroupId,
-      description: 'Security Group ID for ALB created by Ingress Controller',
-      exportName: 'DifyALBSecurityGroupId',
+    // 确保 ALB 在 Helm 之前创建
+    difyHelm.node.addDependency(difyAlb);
+
+    // 输出 ALB DNS
+    new cdk.CfnOutput(this, 'ALBDnsName', {
+      value: difyAlb.albDnsName,
+      description: 'Application Load Balancer DNS Name',
+      exportName: 'DifyALBDnsName',
     });
 
-    // 输出说明
-    new cdk.CfnOutput(this, 'IngressInfo', {
-      value: 'ALB will be automatically created by AWS Load Balancer Controller via Ingress',
-      description: 'Note: Use kubectl get ingress -n dify to get ALB DNS name',
+    // 输出 Target Group ARNs
+    new cdk.CfnOutput(this, 'ApiTargetGroupArn', {
+      value: difyAlb.apiTargetGroup.targetGroupArn,
+      description: 'API Target Group ARN',
+      exportName: 'DifyApiTargetGroupArn',
     });
 
-    console.log('💡 提示: ALB将由AWS Load Balancer Controller通过Ingress资源自动创建');
-    console.log('💡 部署完成后，使用以下命令获取ALB DNS名称:');
-    console.log('   kubectl get ingress -n dify -o jsonpath="{.items[0].status.loadBalancer.ingress[0].hostname}"');
+    new cdk.CfnOutput(this, 'FrontendTargetGroupArn', {
+      value: difyAlb.frontendTargetGroup.targetGroupArn,
+      description: 'Frontend Target Group ARN',
+      exportName: 'DifyFrontendTargetGroupArn',
+    });
+
+    // 输出访问地址
+    new cdk.CfnOutput(this, 'DifyAccessURL', {
+      value: `http://${difyAlb.albDnsName}`,
+      description: 'URL to access Dify application',
+    });
+
+    // 输出部署模式
+    new cdk.CfnOutput(this, 'DeploymentMode', {
+      value: 'TargetGroupBinding',
+      description: 'Deployment mode used for Dify',
+    });
+
+    console.log('💡 提示: 使用 TargetGroupBinding 模式，ALB 已预先创建');
+    console.log(`💡 ALB DNS: ${difyAlb.albDnsName}`);
+    console.log('💡 Dify 服务将自动绑定到 Target Groups');
+    console.log('✅ 一次部署即可完成所有配置，无需手动更新域名');
   }
 }

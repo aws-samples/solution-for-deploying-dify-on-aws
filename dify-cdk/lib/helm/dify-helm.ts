@@ -21,43 +21,54 @@ import { Construct } from 'constructs';
 import { SystemConfig } from '../../src/config';
 import { DatabaseMigrationConstruct } from '../database/db-migration-construct';
 
-// GCR Registry for China region - Updated to match dify-cdk-cn implementation
+// GCR Registry for China region
 const GCR_REGISTRY = '048912060910.dkr.ecr.cn-northwest-1.amazonaws.com.cn/dockerhub/';
 
 export interface DifyHelmConstructProps {
   readonly config: SystemConfig;
-
   readonly vpc: IVpc;
   readonly cluster: eks.ICluster;
-  readonly helmDeployRole?: IRole; // Make optional for existing clusters
-
-  // ALB Security Group ID for Ingress - Required for pure Ingress mode
-  readonly albSecurityGroupId: string;
-
+  readonly helmDeployRole?: IRole;
+  
+  // 选择部署模式：使用 ALB (TargetGroupBinding) 或传统 Ingress
+  readonly useTargetGroupBinding?: boolean;
+  
+  // ALB 配置 (仅用于 TargetGroupBinding 模式)
+  readonly alb?: {
+    readonly apiTargetGroupArn: string;
+    readonly frontendTargetGroupArn: string;
+    readonly dnsName: string;
+    readonly cloudFrontDomain?: string;
+  };
+  
+  // ALB Security Group ID (仅用于 Ingress 模式，不推荐使用)
+  readonly albSecurityGroupId?: string;
+  
   // RDS
   readonly dbEndpoint: string;
   readonly dbPort: string;
-  readonly dbSecretArn: string; // RDS密码Secret ARN
-  readonly dbPassword?: string; // RDS密码（可选，用于覆盖默认值）
-
+  readonly dbSecretArn?: string;
+  readonly dbPassword?: string;
+  
   // S3
   readonly s3BucketName: string;
-
+  
   // Redis
   readonly redisEndpoint: string;
   readonly redisPort: string;
-
+  
   // OpenSearch
   readonly openSearchEndpoint: string;
-  readonly openSearchSecretArn?: string; // OpenSearch密码Secret ARN
+  readonly openSearchSecretArn?: string;
 }
 
 export class DifyHelmConstruct extends Construct {
-
+  
   constructor(scope: Construct, id: string, props: DifyHelmConstructProps) {
     super(scope, id);
-
+    
     const namespace = 'dify';
+    const useTargetGroupBinding = props.useTargetGroupBinding ?? false;
     
     // Create namespace
     const ns = new eks.KubernetesManifest(this, 'dify-ns', {
@@ -68,16 +79,15 @@ export class DifyHelmConstruct extends Construct {
         metadata: { name: namespace },
       }],
     });
-
+    
     // Create IAM role for Dify Service Account with IRSA
-    // Use CfnJson to handle dynamic OIDC issuer token
     const conditions = new CfnJson(this, 'ConditionJson', {
       value: {
         [`${props.cluster.openIdConnectProvider.openIdConnectProviderIssuer}:sub`]: `system:serviceaccount:${namespace}:dify`,
         [`${props.cluster.openIdConnectProvider.openIdConnectProviderIssuer}:aud`]: 'sts.amazonaws.com',
       },
     });
-
+    
     const difyServiceAccountRole = new iam.Role(this, 'DifyServiceAccountRole', {
       assumedBy: new iam.FederatedPrincipal(
         props.cluster.openIdConnectProvider.openIdConnectProviderArn,
@@ -88,7 +98,7 @@ export class DifyHelmConstruct extends Construct {
       ),
       description: 'IAM role for Dify application Service Account with IRSA',
     });
-
+    
     // Add S3 permissions to the role
     difyServiceAccountRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
@@ -108,9 +118,9 @@ export class DifyHelmConstruct extends Construct {
         `arn:aws:s3:::${props.s3BucketName}/*`,
       ],
     }));
-
+    
     console.log(`✅ 创建了Dify Service Account IAM角色: ${difyServiceAccountRole.roleArn}`);
-
+    
     // Generate secret key
     const secretKey = crypto.randomBytes(42).toString('base64');
     
@@ -125,8 +135,25 @@ export class DifyHelmConstruct extends Construct {
     const s3Domain = props.config.isChinaRegion ? 'amazonaws.com.cn' : 'amazonaws.com';
     
     // Get Dify version
-    const difyVersion = props.config.dify.version || '1.7.2';
-
+    const difyVersion = props.config.dify.version || '1.1.0';
+    
+    // 确定 host 和 port
+    let globalHost: string;
+    let globalPort: string;
+    let globalTls: boolean;
+    
+    if (useTargetGroupBinding && props.alb) {
+      // TargetGroupBinding 模式：使用 ALB 或 CloudFront 域名
+      globalHost = props.alb.cloudFrontDomain || props.alb.dnsName;
+      globalPort = props.alb.cloudFrontDomain ? '443' : '80';
+      globalTls = !!props.alb.cloudFrontDomain;
+    } else {
+      // Ingress 模式：使用默认值，稍后由 Ingress 自动更新
+      globalHost = 'dify.local';
+      globalPort = '80';
+      globalTls = false;
+    }
+    
     // 创建数据库迁移（如果启用）
     let dbMigration: DatabaseMigrationConstruct | undefined;
     if (props.config.dify.dbMigration?.enabled) {
@@ -176,8 +203,8 @@ export class DifyHelmConstruct extends Construct {
       
       console.log('✅ 数据库迁移配置完成');
     }
-
-    // Dify Helm configuration - minimized
+    
+    // 使用 douban 的 Helm Chart
     const difyHelmChart = new eks.HelmChart(this, 'DifyHelmChart', {
       cluster: props.cluster,
       chart: 'dify',
@@ -188,9 +215,9 @@ export class DifyHelmConstruct extends Construct {
       createNamespace: false,
       values: {
         global: {
-          host: '', // Will be populated by Ingress
-          port: '80',
-          enableTLS: false,
+          host: globalHost,
+          port: globalPort,
+          enableTLS: globalTls,
           image: { tag: difyVersion },
           edition: 'SELF_HOSTED',
           storageType: 's3',
@@ -232,19 +259,20 @@ export class DifyHelmConstruct extends Construct {
             { name: 'S3_USE_AWS_MANAGED_IAM', value: 'true' },
           ],
         },
-
+        
+        // Ingress 配置
         ingress: {
-          enabled: true,
+          enabled: !useTargetGroupBinding, // TargetGroupBinding 模式下禁用 Ingress
           className: 'alb',
-          annotations: {
+          annotations: useTargetGroupBinding ? {} : {
             'kubernetes.io/ingress.class': 'alb',
             'alb.ingress.kubernetes.io/scheme': 'internet-facing',
             'alb.ingress.kubernetes.io/target-type': 'ip',
             'alb.ingress.kubernetes.io/listen-ports': '[{"HTTP": 80}]',
-            'alb.ingress.kubernetes.io/security-groups': props.albSecurityGroupId,
+            'alb.ingress.kubernetes.io/security-groups': props.albSecurityGroupId || '',
           },
         },
-
+        
         serviceAccount: {
           create: true,
           annotations: {
@@ -252,13 +280,17 @@ export class DifyHelmConstruct extends Construct {
           },
           name: 'dify',
         },
-
+        
         frontend: {
           image: {
             repository: `${imageRegistry}langgenius/dify-web`,
           },
+          service: {
+            type: useTargetGroupBinding ? 'NodePort' : 'ClusterIP',
+            port: 80,
+          },
         },
-
+        
         api: {
           image: {
             repository: `${imageRegistry}langgenius/dify-api`,
@@ -276,35 +308,43 @@ export class DifyHelmConstruct extends Construct {
             limits: { cpu: '2', memory: '2Gi' },
             requests: { cpu: '1', memory: '1Gi' },
           },
+          service: {
+            type: useTargetGroupBinding ? 'NodePort' : 'ClusterIP',
+            port: 80,
+          },
         },
-
+        
         worker: {
           image: {
             repository: `${imageRegistry}langgenius/dify-api`,
           },
         },
-
+        
         sandbox: {
           image: {
             repository: `${imageRegistry}langgenius/dify-sandbox`,
-            tag: 'latest',
+            tag: '0.2.10',
+          },
+          service: {
+            type: useTargetGroupBinding ? 'NodePort' : 'ClusterIP',
+            port: 80,
           },
         },
-
+        
         redis: {
           embedded: false,
         },
-
+        
         postgresql: {
           embedded: false,
         },
-
+        
         minio: {
           embedded: false,
         },
       },
     });
-
+    
     // Add dependencies
     difyHelmChart.node.addDependency(ns);
     
@@ -312,10 +352,88 @@ export class DifyHelmConstruct extends Construct {
     if (dbMigration) {
       difyHelmChart.node.addDependency(dbMigration);
     }
-
-    // 纯Ingress模式 - ALB完全由AWS Load Balancer Controller管理
-    console.log('📝 使用纯Ingress模式，ALB将由AWS Load Balancer Controller自动管理');
-    console.log(`📝 已配置安全组: ${props.albSecurityGroupId}`);
-    console.log('📝 ALB将在Helm部署完成后自动创建');
+    
+    // 如果使用 TargetGroupBinding 模式，创建 TargetGroupBinding 资源
+    if (useTargetGroupBinding && props.alb) {
+      console.log('📝 使用 TargetGroupBinding 模式，创建 TargetGroupBinding 资源...');
+      
+      // 创建 API TargetGroupBinding
+      const apiTgb = new eks.KubernetesManifest(this, 'ApiTargetGroupBinding', {
+        cluster: props.cluster,
+        manifest: [{
+          apiVersion: 'elbv2.k8s.aws/v1beta1',
+          kind: 'TargetGroupBinding',
+          metadata: {
+            name: 'dify-api-tgb',
+            namespace,
+          },
+          spec: {
+            networking: {
+              ingress: [{
+                from: [{
+                  ipBlock: {
+                    cidr: props.vpc.vpcCidrBlock,
+                  },
+                }],
+                ports: [{
+                  protocol: 'TCP',
+                }],
+              }],
+            },
+            serviceRef: {
+              name: 'dify-api-svc',
+              port: 80,
+            },
+            targetGroupARN: props.alb.apiTargetGroupArn,
+          },
+        }],
+      });
+      
+      // 创建 Frontend TargetGroupBinding
+      const frontendTgb = new eks.KubernetesManifest(this, 'FrontendTargetGroupBinding', {
+        cluster: props.cluster,
+        manifest: [{
+          apiVersion: 'elbv2.k8s.aws/v1beta1',
+          kind: 'TargetGroupBinding',
+          metadata: {
+            name: 'dify-frontend-tgb',
+            namespace,
+          },
+          spec: {
+            networking: {
+              ingress: [{
+                from: [{
+                  ipBlock: {
+                    cidr: props.vpc.vpcCidrBlock,
+                  },
+                }],
+                ports: [{
+                  protocol: 'TCP',
+                }],
+              }],
+            },
+            serviceRef: {
+              name: 'dify-frontend',
+              port: 80,
+            },
+            targetGroupARN: props.alb.frontendTargetGroupArn,
+          },
+        }],
+      });
+      
+      // 确保 TargetGroupBinding 在 Helm Chart 之后创建
+      apiTgb.node.addDependency(difyHelmChart);
+      frontendTgb.node.addDependency(difyHelmChart);
+      
+      console.log('✅ TargetGroupBinding 资源配置完成');
+      console.log(`📝 ALB DNS: ${props.alb.dnsName}`);
+      if (props.alb.cloudFrontDomain) {
+        console.log(`📝 CloudFront Domain: ${props.alb.cloudFrontDomain}`);
+      }
+    } else {
+      console.log('📝 使用传统 Ingress 模式，ALB 将由 AWS Load Balancer Controller 自动管理');
+      console.log(`📝 已配置安全组: ${props.albSecurityGroupId}`);
+      console.log('📝 ALB 将在 Helm 部署完成后自动创建');
+    }
   }
 }
