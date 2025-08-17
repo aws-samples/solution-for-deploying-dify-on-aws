@@ -5,7 +5,7 @@
     "version": "1.7.2",
     "pluginDaemon": {
       "enabled": true,
-      "storageSize": "10Gi"
+      "storageSize": "20Gi"
     },
     "migration": {
       "enabled": false,
@@ -18,23 +18,23 @@
   "network": {
     "useExistingVpc": false,
     "vpcCidr": "10.0.0.0/16",
-    "maxAzs": 2
+    "maxAzs": 3
   },
   "domain": {
     "useCloudfront": true,
-    "domainName": "",
-    "hostedZoneId": "",
+    "domainName": "dify.example.jp",
+    "hostedZoneId": "YOUR_HOSTED_ZONE_ID",
     "cloudfront": {
       "enabled": true,
-      "domainName": "",
-      "aliases": [],
+      "domainName": "dify.example.jp",
+      "aliases": ["www.dify.example.jp"],
       "priceClass": "PriceClass_200",
       "waf": {
-        "enabled": false,
+        "enabled": true,
         "rateLimit": 5000,
         "geoRestriction": {
-          "restrictionType": "blacklist",
-          "locations": []
+          "restrictionType": "whitelist",
+          "locations": ["JP", "US", "SG", "KR", "HK", "TW"]
         }
       },
       "cachePolicy": {
@@ -43,75 +43,75 @@
         "minTTL": 0
       },
       "logging": {
-        "enabled": false,
+        "enabled": true,
         "prefix": "cloudfront-logs/"
       },
       "originShield": {
-        "enabled": false,
+        "enabled": true,
         "region": "ap-northeast-1"
       }
     }
   },
   "cluster": {
     "useExistingCluster": false,
-    "clusterName": "dify-eks",
+    "clusterName": "dify-eks-jp",
     "version": "1.33",
     "vpcSubnetIds": [],
     "managedNodeGroups": {
       "app": {
-        "desiredSize": 2,
-        "minSize": 1,
-        "maxSize": 4,
-        "instanceType": "m8g.large",
-        "diskSize": 40,
+        "desiredSize": 3,
+        "minSize": 2,
+        "maxSize": 6,
+        "instanceType": "m8g.xlarge",
+        "diskSize": 60,
         "workerNodeSubnetIds": []
       }
     },
-    "eksClusterName": "dify-eks"
+    "eksClusterName": "dify-eks-jp"
   },
   "s3": {
-    "removeWhenDestroyed": true,
+    "removeWhenDestroyed": false,
     "useAccessKeyAuth": false
   },
   "postgresSQL": {
     "postgresFullVersion": "16.4",
     "postgresMajorVersion": "16",
-    "instanceType": "db.t4g.medium",
+    "instanceType": "db.t4g.large",
     "dbName": "dify",
     "dbCredentialUsername": "postgres",
-    "dbCredentialPassword": "Dify.Postgres.2024!",
-    "backupRetention": 0,
-    "storageSize": 100,
-    "removeWhenDestroyed": true,
+    "dbCredentialPassword": "",
+    "backupRetention": 7,
+    "storageSize": 200,
+    "removeWhenDestroyed": false,
     "subnetIds": [],
     "multiAz": {
-      "enabled": false,
+      "enabled": true,
       "subnetGroupName": ""
     }
   },
   "redis": {
     "engineVersion": "7.0",
-    "nodeType": "cache.t4g.micro",
-    "readReplicas": 0,
+    "nodeType": "cache.t4g.small",
+    "readReplicas": 1,
     "subnetIds": [],
     "multiAZ": {
-      "enabled": false,
+      "enabled": true,
       "subnetGroupName": ""
     }
   },
   "openSearch": {
-    "enabled": false,
+    "enabled": true,
     "masterUserName": "admin",
-    "masterUserPassword": "Dify.OpenSearch.2024!",
+    "masterUserPassword": "",
     "multiAz": {
-      "enabled": false,
-      "azCount": 1
+      "enabled": true,
+      "azCount": 3
     },
     "subnetIds": [],
     "capacity": {
-      "dataNodes": 1,
-      "dataNodeInstanceType": "t3g.small.search"
+      "dataNodes": 3,
+      "dataNodeInstanceType": "t3g.medium.search"
     },
-    "dataNodeSize": 20
+    "dataNodeSize": 50
   }
 }

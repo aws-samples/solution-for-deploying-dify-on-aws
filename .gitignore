@@ -34,3 +34,5 @@ node_modules/
 Thumbs.db
 .DS_Store
 dify-cdk/deploy-tokyo.sh
+dify-cdk/CODE_REVIEW.md
+dify-cdk/SECURITY_RECOMMENDATIONS.md

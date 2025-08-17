@@ -120,7 +120,6 @@ try {
     vpc: vpcStack.vpc,
     clusterSecurityGroup: eksStack.clusterSecurityGroup,
     albSecurityGroupId: eksStack.albSecurityGroup.securityGroup.securityGroupId,
-    cloudFrontDomain: cloudFrontDomain, // 传递 CloudFront 域名
 
     // 数据库连接
     dbEndpoint: rdsStack.dbEndpoint,

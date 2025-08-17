@@ -104,9 +104,6 @@ try {
     vpc: vpcStack.vpc,
     clusterSecurityGroup: eksStack.clusterSecurityGroup,
     albSecurityGroupId: eksStack.albSecurityGroup.securityGroup.securityGroupId,
-    
-    // CloudFront 域名（如果启用）
-    cloudFrontDomain: undefined, // CloudFront 域名将在后续步骤设置
 
     // 数据库连接
     dbEndpoint: rdsStack.dbEndpoint,
