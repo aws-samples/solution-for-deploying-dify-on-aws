@@ -5,6 +5,8 @@
     "version": "1.7.2",
     "pluginDaemon": {
       "enabled": true,
+      "serverKey": "lYkiYYT6owG+71oLerGzA7GXCgOT++6ovaezWAjpCjf+Sjc3ZtU+qUEi",
+      "difyInnerApiKey": "QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1",
       "storageSize": "10Gi"
     },
     "migration": {

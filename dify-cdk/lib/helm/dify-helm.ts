@@ -258,6 +258,20 @@ export class DifyHelmConstruct extends Construct {
             { name: 'S3_BUCKET_NAME', value: props.s3BucketName },
             { name: 'S3_REGION', value: Aws.REGION },
             { name: 'S3_USE_AWS_MANAGED_IAM', value: 'true' },
+            
+            // DNS和网络相关配置
+            { name: 'SSRF_PROXY_HTTP_URL', value: '' },  // 清空代理配置，直接访问
+            { name: 'SSRF_PROXY_HTTPS_URL', value: '' }, // 清空代理配置，直接访问
+            
+            // Plugin Daemon 相关环境变量 (仅当 pluginDaemon 启用时添加)
+            ...(props.config.dify.pluginDaemon?.enabled ? [
+              { name: 'PLUGIN_DAEMON_URL', value: 'http://dify-plugin-daemon:5002' },
+              { name: 'MARKETPLACE_API_URL', value: 'https://marketplace.dify.ai' },
+              { name: 'PLUGIN_DAEMON_KEY', value: props.config.dify.pluginDaemon.serverKey || 'lYkiYYT6owG+71oLerGzA7GXCgOT++6ovaezWAjpCjf+Sjc3ZtU+qUEi' },
+              { name: 'PLUGIN_DIFY_INNER_API_KEY', value: props.config.dify.pluginDaemon.difyInnerApiKey || 'QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1' },
+              { name: 'INNER_API_KEY_FOR_PLUGIN', value: props.config.dify.pluginDaemon.difyInnerApiKey || 'QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1' },
+              { name: 'PLUGIN_DIFY_INNER_API_URL', value: 'http://dify-api-svc:80' },
+            ] : []),
           ],
         },
         
@@ -290,6 +304,10 @@ export class DifyHelmConstruct extends Construct {
             type: useTargetGroupBinding ? 'NodePort' : 'ClusterIP',
             port: 80,
           },
+          envs: [
+            { name: 'MARKETPLACE_API_URL', value: 'https://marketplace.dify.ai' },
+            { name: 'MARKETPLACE_URL', value: 'https://marketplace.dify.ai' },
+          ],
         },
         
         api: {
@@ -311,9 +329,9 @@ export class DifyHelmConstruct extends Construct {
             { name: 'CODE_MAX_NUMBER_ARRAY_LENGTH', value: '1000' },
             { name: 'CODE_MAX_DEPTH', value: '5' },
             
-            // SSRF Proxy configuration (if needed)
-            { name: 'SSRF_PROXY_HTTP_URL', value: 'http://ssrf:3128' },
-            { name: 'SSRF_PROXY_HTTPS_URL', value: 'http://ssrf:3128' },
+            // SSRF Proxy configuration (禁用代理，允许直接访问外部API)
+            { name: 'SSRF_PROXY_HTTP_URL', value: '' },
+            { name: 'SSRF_PROXY_HTTPS_URL', value: '' },
           ],
           resources: {
             limits: { cpu: '2', memory: '2Gi' },
