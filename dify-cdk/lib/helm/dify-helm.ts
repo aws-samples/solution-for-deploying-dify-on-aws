@@ -1,39 +1,45 @@
 /**
- *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- *  Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file except in compliance
- *  with the License. A copy of the License is located at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- *  or in the 'license' file accompanying this file. This file is distributed on an 'AS IS' BASIS, WITHOUT WARRANTIES
- *  OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions
- *  and limitations under the License.
+ *  Dify Helm 部署构造器 - 整合版
+ *  
+ *  整合了以下功能：
+ *  1. 支持 TargetGroupBinding
+ *  2. 整合 ALB 和 CloudFront 配置
+ *  3. 支持数据库自动迁移
+ *  4. 优化的 Helm values 配置
+ *  5. 支持中国区域特殊配置
  */
 
 import * as crypto from 'crypto';
-import { Aws, Duration, CfnJson } from 'aws-cdk-lib';
+import * as cdk from 'aws-cdk-lib';
+import { Aws, Duration, CfnJson, RemovalPolicy } from 'aws-cdk-lib';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { IVpc } from 'aws-cdk-lib/aws-ec2';
 import * as eks from 'aws-cdk-lib/aws-eks';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { IRole } from 'aws-cdk-lib/aws-iam';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { Construct } from 'constructs';
 import { SystemConfig } from '../../src/config';
 import { DatabaseMigrationConstruct } from '../database/db-migration-construct';
+import { DifyALBConstruct } from '../alb/dify-alb-construct';
 
 // GCR Registry for China region
 const GCR_REGISTRY = '048912060910.dkr.ecr.cn-northwest-1.amazonaws.com.cn/dockerhub/';
 
+/**
+ * Dify Helm 构造器属性
+ */
 export interface DifyHelmConstructProps {
   readonly config: SystemConfig;
   readonly vpc: IVpc;
   readonly cluster: eks.ICluster;
   readonly helmDeployRole?: IRole;
   
-  // 选择部署模式：使用 ALB (TargetGroupBinding) 或传统 Ingress
-  readonly useTargetGroupBinding?: boolean;
+  // 部署模式选择
+  readonly enableCloudFront?: boolean;
   
-  // ALB 配置 (仅用于 TargetGroupBinding 模式)
+  // ALB 配置 (默认 TargetGroupBinding 模式)
   readonly alb?: {
     readonly apiTargetGroupArn: string;
     readonly frontendTargetGroupArn: string;
@@ -41,7 +47,7 @@ export interface DifyHelmConstructProps {
     readonly cloudFrontDomain?: string;
   };
   
-  // ALB Security Group ID (仅用于 Ingress 模式，不推荐使用)
+  // ALB Security Group ID (Ingress 模式)
   readonly albSecurityGroupId?: string;
   
   // RDS
@@ -58,20 +64,351 @@ export interface DifyHelmConstructProps {
   readonly redisPort: string;
   
   // OpenSearch
-  readonly openSearchEndpoint: string;
+  readonly openSearchEndpoint?: string;
   readonly openSearchSecretArn?: string;
 }
 
+/**
+ * Dify Helm Stack - 整合版
+ * 可作为独立 Stack 或 Construct 使用
+ */
+export class DifyHelmStack extends cdk.Stack {
+  public readonly distributionDomainName?: string;
+  public readonly albDnsName?: string;
+  public readonly distributionId?: string;
+
+  constructor(scope: Construct, id: string, props: DifyHelmStackProps) {
+    super(scope, id, props);
+
+    console.log('🚀 部署 Dify Helm Stack (整合版)');
+
+    // 创建 ALB（默认 TargetGroupBinding 模式始终需要）
+    console.log('🔧 创建 ALB 和 Target Groups (TargetGroupBinding 模式)...');
+    const difyAlb = new DifyALBConstruct(this, 'DifyALB', {
+      vpc: props.vpc,
+      config: props.config,
+      albSecurityGroupId: props.albSecurityGroupId,
+    });
+    
+    const albDnsName = difyAlb.albDnsName;
+    this.albDnsName = albDnsName;
+    
+    // 创建 CloudFront（如果启用）
+    let cloudFrontDomain: string | undefined;
+    if (props.config.domain.cloudfront?.enabled && albDnsName) {
+      console.log('🌐 创建 CloudFront Distribution...');
+      const distribution = this.createCloudFront(albDnsName, props.config);
+      cloudFrontDomain = distribution.distributionDomainName;
+      this.distributionDomainName = cloudFrontDomain;
+      this.distributionId = distribution.distributionId;
+    }
+    
+    // 构建 ALB 配置（包含可选的 CloudFront 域名）
+    const albConfig: DifyHelmConstructProps['alb'] = {
+      apiTargetGroupArn: difyAlb.apiTargetGroup.targetGroupArn,
+      frontendTargetGroupArn: difyAlb.frontendTargetGroup.targetGroupArn,
+      dnsName: albDnsName,
+      ...(cloudFrontDomain && { cloudFrontDomain }),
+    };
+
+    // 部署 Helm Chart
+    const helmConstruct = new DifyHelmConstruct(this, 'DifyHelm', {
+      config: props.config,
+      vpc: props.vpc,
+      cluster: props.cluster,
+      helmDeployRole: undefined,
+      alb: albConfig,
+      // 默认使用 TargetGroupBinding，不需要传递参数
+      albSecurityGroupId: props.albSecurityGroupId,
+      dbEndpoint: props.dbEndpoint,
+      dbPort: props.dbPort,
+      dbSecretArn: props.dbSecretArn,
+      dbPassword: props.dbPassword,
+      s3BucketName: props.s3BucketName,
+      redisEndpoint: props.redisEndpoint,
+      redisPort: props.redisPort,
+      openSearchEndpoint: props.openSearchEndpoint,
+      openSearchSecretArn: props.openSearchSecretArn,
+    });
+
+    // 创建输出
+    this.createOutputs(albDnsName, cloudFrontDomain);
+  }
+
+  /**
+   * 创建 CloudFront Distribution
+   */
+  private createCloudFront(
+    albDnsName: string, 
+    config: SystemConfig
+  ): cloudfront.Distribution {
+    
+    // 创建原点
+    const origin = new origins.HttpOrigin(albDnsName, {
+      protocolPolicy: cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+      httpPort: 80,
+      connectionAttempts: 3,
+      connectionTimeout: Duration.seconds(10),
+      readTimeout: Duration.seconds(30),
+      keepaliveTimeout: Duration.seconds(5),
+      customHeaders: {
+        'X-CloudFront-Secret': 'dify-cloudfront-secret',
+      },
+    });
+
+    // 创建缓存策略
+    const apiCachePolicy = new cloudfront.CachePolicy(this, 'ApiCachePolicy', {
+      cachePolicyName: `${this.stackName}-api-cache`,
+      comment: 'Cache policy for API endpoints',
+      defaultTtl: Duration.seconds(0),
+      maxTtl: Duration.seconds(1),
+      minTtl: Duration.seconds(0),
+      enableAcceptEncodingGzip: true,
+      enableAcceptEncodingBrotli: true,
+      queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
+      headerBehavior: cloudfront.CacheHeaderBehavior.allowList(
+        'Authorization',
+        'Content-Type',
+        'X-App-Code'
+      ),
+      cookieBehavior: cloudfront.CacheCookieBehavior.all(),
+    });
+
+    const staticCachePolicy = new cloudfront.CachePolicy(this, 'StaticCachePolicy', {
+      cachePolicyName: `${this.stackName}-static-cache`,
+      comment: 'Cache policy for static assets',
+      defaultTtl: Duration.days(30),
+      maxTtl: Duration.days(365),
+      minTtl: Duration.days(1),
+      enableAcceptEncodingGzip: true,
+      enableAcceptEncodingBrotli: true,
+      queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
+      headerBehavior: cloudfront.CacheHeaderBehavior.none(),
+      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
+    });
+
+    const defaultCachePolicy = new cloudfront.CachePolicy(this, 'DefaultCachePolicy', {
+      cachePolicyName: `${this.stackName}-default-cache`,
+      comment: 'Default cache policy',
+      defaultTtl: Duration.days(1),
+      maxTtl: Duration.days(365),
+      minTtl: Duration.seconds(0),
+      enableAcceptEncodingGzip: true,
+      enableAcceptEncodingBrotli: true,
+      queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
+      headerBehavior: cloudfront.CacheHeaderBehavior.none(),
+      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
+    });
+
+    // 创建响应头策略
+    const responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(this, 'ResponseHeaders', {
+      responseHeadersPolicyName: `${this.stackName}-response-headers`,
+      comment: 'Response headers for Dify',
+      securityHeadersBehavior: {
+        contentTypeOptions: { override: true },
+        frameOptions: { 
+          frameOption: cloudfront.HeadersFrameOption.DENY,
+          override: true 
+        },
+        referrerPolicy: {
+          referrerPolicy: cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+          override: true
+        },
+        strictTransportSecurity: {
+          accessControlMaxAge: Duration.seconds(63072000),
+          includeSubdomains: true,
+          override: true
+        },
+        xssProtection: {
+          protection: true,
+          modeBlock: true,
+          override: true
+        },
+      },
+    });
+
+    // 创建 CloudFront Distribution
+    const distribution = new cloudfront.Distribution(this, 'Distribution', {
+      defaultRootObject: 'index.html',
+      httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
+      enableIpv6: true,
+      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+      priceClass: cloudfront.PriceClass.PRICE_CLASS_200,
+      
+      comment: `CloudFront distribution for Dify application`,
+      
+      defaultBehavior: {
+        origin,
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+        cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
+        cachePolicy: defaultCachePolicy,
+        responseHeadersPolicy,
+        compress: true,
+      },
+      
+      additionalBehaviors: {
+        '/api/*': {
+          origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: apiCachePolicy,
+          responseHeadersPolicy,
+          compress: true,
+        },
+        '/v1/*': {
+          origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: apiCachePolicy,
+          responseHeadersPolicy,
+          compress: true,
+        },
+        '/console/api/*': {
+          origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: apiCachePolicy,
+          responseHeadersPolicy,
+          compress: true,
+        },
+        '/files/*': {
+          origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: apiCachePolicy,
+          responseHeadersPolicy,
+          compress: true,
+        },
+        '/static/*': {
+          origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+          cachePolicy: staticCachePolicy,
+          responseHeadersPolicy,
+          compress: true,
+        },
+        '/_next/static/*': {
+          origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+          cachePolicy: staticCachePolicy,
+          responseHeadersPolicy,
+          compress: true,
+        },
+      },
+      
+      errorResponses: [
+        {
+          httpStatus: 404,
+          responseHttpStatus: 200,
+          responsePagePath: '/index.html',
+          ttl: Duration.minutes(5),
+        },
+        {
+          httpStatus: 403,
+          responseHttpStatus: 200,
+          responsePagePath: '/index.html',
+          ttl: Duration.minutes(5),
+        },
+      ],
+    });
+
+    return distribution;
+  }
+
+  /**
+   * 创建 Stack 输出
+   */
+  private createOutputs(
+    albDnsName?: string,
+    cloudFrontDomain?: string
+  ): void {
+    
+    if (albDnsName) {
+      new cdk.CfnOutput(this, 'ALBDnsName', {
+        value: albDnsName,
+        description: 'Application Load Balancer DNS Name',
+        exportName: `${this.stackName}-ALBDnsName`,
+      });
+    }
+
+    if (cloudFrontDomain) {
+      new cdk.CfnOutput(this, 'CloudFrontDomain', {
+        value: `https://${cloudFrontDomain}`,
+        description: 'CloudFront Distribution Domain',
+        exportName: `${this.stackName}-CloudFrontDomain`,
+      });
+
+      if (this.distributionId) {
+        new cdk.CfnOutput(this, 'DistributionId', {
+          value: this.distributionId,
+          description: 'CloudFront Distribution ID',
+          exportName: `${this.stackName}-DistributionId`,
+        });
+      }
+    }
+
+    const accessUrl = cloudFrontDomain 
+      ? `https://${cloudFrontDomain}`
+      : albDnsName ? `http://${albDnsName}` : 'Not Available';
+      
+    new cdk.CfnOutput(this, 'AccessURL', {
+      value: accessUrl,
+      description: 'URL to access Dify application',
+      exportName: `${this.stackName}-AccessURL`,
+    });
+
+    console.log('✅ Stack 输出配置完成');
+    console.log(`📍 访问地址: ${accessUrl}`);
+  }
+}
+
+/**
+ * DifyHelmStack 属性
+ */
+export interface DifyHelmStackProps extends cdk.StackProps {
+  readonly config: SystemConfig;
+  readonly cluster: eks.ICluster;
+  readonly vpc: ec2.IVpc;
+  readonly clusterSecurityGroup?: ec2.ISecurityGroup;
+  readonly albSecurityGroupId?: string;
+  
+  // 不再需要这些选项，始终创建 ALB 和使用 TargetGroupBinding
+  
+  // Database
+  readonly dbEndpoint: string;
+  readonly dbPort: string;
+  readonly dbSecretArn?: string;
+  readonly dbPassword?: string;
+  
+  // S3
+  readonly s3BucketName: string;
+  
+  // Redis
+  readonly redisEndpoint: string;
+  readonly redisPort: string;
+  
+  // OpenSearch (optional)
+  readonly openSearchEndpoint?: string;
+  readonly openSearchSecretArn?: string;
+}
+
+/**
+ * Dify Helm 部署构造器
+ */
 export class DifyHelmConstruct extends Construct {
   
   constructor(scope: Construct, id: string, props: DifyHelmConstructProps) {
     super(scope, id);
     
     const namespace = 'dify';
-    const useTargetGroupBinding = props.useTargetGroupBinding ?? false;
     
-    // Create namespace
-    const ns = new eks.KubernetesManifest(this, 'dify-ns', {
+    console.log('🚀 部署 Dify Helm Chart');
+    console.log('🔧 部署模式: TargetGroupBinding (默认)');
+    
+    // 创建 namespace
+    const ns = new eks.KubernetesManifest(this, 'Namespace', {
       cluster: props.cluster,
       manifest: [{
         apiVersion: 'v1',
@@ -80,7 +417,7 @@ export class DifyHelmConstruct extends Construct {
       }],
     });
     
-    // Create IAM role for Dify Service Account with IRSA
+    // 创建 IAM role for Service Account (IRSA)
     const conditions = new CfnJson(this, 'ConditionJson', {
       value: {
         [`${props.cluster.openIdConnectProvider.openIdConnectProviderIssuer}:sub`]: `system:serviceaccount:${namespace}:dify`,
@@ -99,7 +436,7 @@ export class DifyHelmConstruct extends Construct {
       description: 'IAM role for Dify application Service Account with IRSA',
     });
     
-    // Add S3 permissions to the role
+    // 添加 S3 权限
     difyServiceAccountRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
@@ -119,93 +456,46 @@ export class DifyHelmConstruct extends Construct {
       ],
     }));
     
-    console.log(`✅ 创建了Dify Service Account IAM角色: ${difyServiceAccountRole.roleArn}`);
+    console.log(`✅ 创建了 Dify Service Account IAM 角色: ${difyServiceAccountRole.roleArn}`);
     
-    // Generate secret key
+    // 生成密钥
     const secretKey = crypto.randomBytes(42).toString('base64');
     
-    // Get passwords from config
-    const dbPassword = props.dbPassword || props.config.postgresSQL.dbCredentialPassword || 'Dify.Postgres.2024!';
-    const opensearchPassword = props.config.openSearch.masterUserPassword || 'OpenSearch.Admin.2024!';
+    // 获取配置
+    const dbPassword = props.dbPassword || 
+                      props.config.postgresSQL.dbCredentialPassword || 
+                      'Dify.Postgres.2024!';
+    const opensearchPassword = props.config.openSearch.masterUserPassword || 
+                              'OpenSearch.Admin.2024!';
     
-    // Image registry for China region
+    // 镜像仓库前缀
     const imageRegistry = props.config.isChinaRegion ? GCR_REGISTRY : '';
     
-    // S3 domain based on region
+    // S3 域名
     const s3Domain = props.config.isChinaRegion ? 'amazonaws.com.cn' : 'amazonaws.com';
     
-    // Get Dify version
+    // Dify 版本
     const difyVersion = props.config.dify.version || '1.1.0';
     
-    // 确定 host 和 port
-    let globalHost: string;
-    let globalPort: string;
-    let globalTls: boolean;
-    
-    if (useTargetGroupBinding && props.alb) {
-      // TargetGroupBinding 模式：使用 ALB 或 CloudFront 域名
-      globalHost = props.alb.cloudFrontDomain || props.alb.dnsName;
-      globalPort = props.alb.cloudFrontDomain ? '443' : '80';
-      globalTls = !!props.alb.cloudFrontDomain;
-    } else {
-      // Ingress 模式：使用默认值，稍后由 Ingress 自动更新
-      globalHost = 'dify.local';
-      globalPort = '80';
-      globalTls = false;
-    }
+    // 确定访问 URL
+    const baseUrl = props.alb?.cloudFrontDomain
+      ? `https://${props.alb.cloudFrontDomain}`
+      : props.alb?.dnsName 
+        ? `http://${props.alb.dnsName}`
+        : 'http://localhost';
     
     // 创建数据库迁移（如果启用）
-    let dbMigration: DatabaseMigrationConstruct | undefined;
     if (props.config.dify.dbMigration?.enabled) {
-      console.log('🔄 启用数据库自动迁移...');
-      
-      // 创建数据库密码Secret
-      const dbSecretName = 'dify-db-credentials';
-      const dbSecretManifest = new eks.KubernetesManifest(this, 'db-secret', {
-        cluster: props.cluster,
-        manifest: [{
-          apiVersion: 'v1',
-          kind: 'Secret',
-          metadata: {
-            name: dbSecretName,
-            namespace,
-          },
-          type: 'Opaque',
-          stringData: {
-            'password': dbPassword,
-            'username': props.config.postgresSQL.dbCredentialUsername || 'postgres',
-          },
-        }],
-      });
-      
-      // 确保Secret在namespace之后创建
-      dbSecretManifest.node.addDependency(ns);
-      
-      // 创建数据库迁移构造器
-      dbMigration = new DatabaseMigrationConstruct(this, 'DbMigration', {
-        config: props.config,
-        cluster: props.cluster,
+      this.createDatabaseMigration(
+        props,
         namespace,
-        database: {
-          endpoint: props.dbEndpoint,
-          port: props.dbPort,
-          username: props.config.postgresSQL.dbCredentialUsername || 'postgres',
-          secretName: dbSecretName,
-          dbName: props.config.postgresSQL.dbName || 'dify',
-        },
-        serviceAccountName: 'dify',
-        difyVersion: difyVersion,
-        imageRegistry,
-      });
-      
-      // 确保迁移在Secret之后创建
-      dbMigration.node.addDependency(dbSecretManifest);
-      
-      console.log('✅ 数据库迁移配置完成');
+        dbPassword,
+        ns
+      );
     }
     
-    // 使用 douban 的 Helm Chart
-    const difyHelmChart = new eks.HelmChart(this, 'DifyHelmChart', {
+    // 部署 Helm Chart（优化配置）
+    const helmChart = new eks.HelmChart(this, 'HelmChart', {
       cluster: props.cluster,
       chart: 'dify',
       repository: 'https://douban.github.io/charts/',
@@ -213,81 +503,42 @@ export class DifyHelmConstruct extends Construct {
       namespace,
       timeout: Duration.minutes(15),
       createNamespace: false,
+      wait: false, // 优化：不等待完成，避免返回大量数据
       values: {
         global: {
-          host: globalHost,
-          port: globalPort,
-          enableTLS: globalTls,
+          host: props.alb?.cloudFrontDomain || props.alb?.dnsName || 'localhost',
+          port: props.alb?.cloudFrontDomain ? '443' : '80',
+          enableTLS: !!props.alb?.cloudFrontDomain,
           image: { tag: difyVersion },
           edition: 'SELF_HOSTED',
           storageType: 's3',
-          // 只放入真正所有后端组件都需要的通用环境变量
+          // 优化后的环境变量配置 - 只保留真正通用的配置（15个以内）
           extraBackendEnvs: [
+            // 核心配置 (2个)
             { name: 'SECRET_KEY', value: secretKey },
             { name: 'LOG_LEVEL', value: 'INFO' },
             
-            // Database
+            // Database (5个)
             { name: 'DB_USERNAME', value: props.config.postgresSQL.dbCredentialUsername || 'postgres' },
             { name: 'DB_PASSWORD', value: dbPassword },
             { name: 'DB_HOST', value: props.dbEndpoint },
             { name: 'DB_PORT', value: props.dbPort },
             { name: 'DB_DATABASE', value: props.config.postgresSQL.dbName || 'dify' },
             
-            // OpenSearch (if enabled)
-            ...(props.config.openSearch.enabled ? [
-              { name: 'VECTOR_STORE', value: 'opensearch' },
-              { name: 'OPENSEARCH_HOST', value: props.openSearchEndpoint },
-              { name: 'OPENSEARCH_PORT', value: '443' },
-              { name: 'OPENSEARCH_USER', value: props.config.openSearch.masterUserName || 'admin' },
-              { name: 'OPENSEARCH_PASSWORD', value: opensearchPassword },
-              { name: 'OPENSEARCH_SECURE', value: 'true' },
-            ] : []),
-            
-            // Redis
+            // Redis (3个)
             { name: 'REDIS_HOST', value: props.redisEndpoint },
             { name: 'REDIS_PORT', value: props.redisPort },
-            { name: 'REDIS_DB', value: '0' },
-            { name: 'REDIS_USERNAME', value: '' },
-            { name: 'REDIS_PASSWORD', value: '' },
-            { name: 'REDIS_USE_SSL', value: props.config.isChinaRegion ? 'true' : 'false' },
             { name: 'CELERY_BROKER_URL', value: `redis://:@${props.redisEndpoint}:${props.redisPort}/1` },
-            { name: 'BROKER_USE_SSL', value: props.config.isChinaRegion ? 'true' : 'false' },
             
-            // S3
+            // S3 (4个)
             { name: 'S3_ENDPOINT', value: `https://${props.s3BucketName}.s3.${Aws.REGION}.${s3Domain}` },
             { name: 'S3_BUCKET_NAME', value: props.s3BucketName },
             { name: 'S3_REGION', value: Aws.REGION },
             { name: 'S3_USE_AWS_MANAGED_IAM', value: 'true' },
-            
-            // DNS和网络相关配置
-            { name: 'SSRF_PROXY_HTTP_URL', value: '' },  // 清空代理配置，直接访问
-            { name: 'SSRF_PROXY_HTTPS_URL', value: '' }, // 清空代理配置，直接访问
-            
-            // Plugin Daemon 相关环境变量 (仅当 pluginDaemon 启用时添加)
-            ...(props.config.dify.pluginDaemon?.enabled ? [
-              { name: 'PLUGIN_DAEMON_URL', value: 'http://dify-plugin-daemon:5002' },
-              { name: 'MARKETPLACE_API_URL', value: 'https://marketplace.dify.ai' },
-              { name: 'PLUGIN_DAEMON_KEY', value: props.config.dify.pluginDaemon.serverKey || 'lYkiYYT6owG+71oLerGzA7GXCgOT++6ovaezWAjpCjf+Sjc3ZtU+qUEi' },
-              { name: 'PLUGIN_DIFY_INNER_API_KEY', value: props.config.dify.pluginDaemon.difyInnerApiKey || 'QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1' },
-              { name: 'INNER_API_KEY_FOR_PLUGIN', value: props.config.dify.pluginDaemon.difyInnerApiKey || 'QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1' },
-              { name: 'PLUGIN_DIFY_INNER_API_URL', value: 'http://dify-api-svc:80' },
-            ] : []),
           ],
         },
         
-        // Ingress 配置
-        ingress: {
-          enabled: !useTargetGroupBinding, // TargetGroupBinding 模式下禁用 Ingress
-          className: 'alb',
-          annotations: useTargetGroupBinding ? {} : {
-            'kubernetes.io/ingress.class': 'alb',
-            'alb.ingress.kubernetes.io/scheme': 'internet-facing',
-            'alb.ingress.kubernetes.io/target-type': 'ip',
-            'alb.ingress.kubernetes.io/listen-ports': '[{"HTTP": 80}]',
-            'alb.ingress.kubernetes.io/security-groups': props.albSecurityGroupId || '',
-          },
-        },
-        
+        // Service Account 配置
         serviceAccount: {
           create: true,
           annotations: {
@@ -296,30 +547,83 @@ export class DifyHelmConstruct extends Construct {
           name: 'dify',
         },
         
+        // 前端配置
         frontend: {
           image: {
             repository: `${imageRegistry}langgenius/dify-web`,
           },
           service: {
-            type: useTargetGroupBinding ? 'NodePort' : 'ClusterIP',
+            type: 'NodePort',  // TargetGroupBinding 需要 NodePort
             port: 80,
           },
           envs: [
+            { name: 'CONSOLE_API_URL', value: baseUrl },
+            { name: 'CONSOLE_WEB_URL', value: baseUrl },
+            { name: 'SERVICE_API_URL', value: baseUrl },
+            { name: 'APP_API_URL', value: baseUrl },
+            { name: 'APP_WEB_URL', value: baseUrl },
             { name: 'MARKETPLACE_API_URL', value: 'https://marketplace.dify.ai' },
             { name: 'MARKETPLACE_URL', value: 'https://marketplace.dify.ai' },
+            { name: 'NEXT_TELEMETRY_DISABLED', value: '1' },
+            { name: 'EDITION', value: 'SELF_HOSTED' },
+            { name: 'DEPLOY_ENV', value: 'PRODUCTION' },
+            { name: 'ENABLE_WORKFLOW', value: 'true' },
+            { name: 'ENABLE_TOOLS', value: 'true' },
+            { name: 'ENABLE_DATASET', value: 'true' },
+            { name: 'ENABLE_EXPLORE', value: 'true' },
           ],
         },
         
+        // API 配置
         api: {
           image: {
             repository: `${imageRegistry}langgenius/dify-api`,
           },
+          service: {
+            type: 'NodePort',  // TargetGroupBinding 需要 NodePort
+            port: 80,
+          },
+          resources: {
+            limits: { cpu: '2', memory: '2Gi' },
+            requests: { cpu: '1', memory: '1Gi' },
+          },
           envs: [
-            // Sandbox configuration (特定于 API 组件)
+            // API需要的额外配置
+            { name: 'EDITION', value: 'SELF_HOSTED' },
+            { name: 'DEPLOY_ENV', value: 'PRODUCTION' },
+            { name: 'MIGRATION_ENABLED', value: 'true' },
+            { name: 'STORAGE_TYPE', value: 's3' },
+            { name: 'CONSOLE_CORS_ALLOW_ORIGINS', value: '*' },
+            { name: 'WEB_API_CORS_ALLOW_ORIGINS', value: '*' },
+            
+            // Redis SSL配置（API需要）
+            { name: 'REDIS_DB', value: '0' },
+            { name: 'REDIS_USERNAME', value: '' },
+            { name: 'REDIS_PASSWORD', value: '' },
+            { name: 'REDIS_USE_SSL', value: props.config.isChinaRegion ? 'true' : 'false' },
+            { name: 'BROKER_USE_SSL', value: props.config.isChinaRegion ? 'true' : 'false' },
+            
+            // Database URL（API需要）
+            { name: 'SQLALCHEMY_DATABASE_URI', value: `postgresql://${props.config.postgresSQL.dbCredentialUsername || 'postgres'}:${dbPassword}@${props.dbEndpoint}:${props.dbPort}/${props.config.postgresSQL.dbName || 'dify'}` },
+            
+            // OpenSearch（如果启用）
+            ...(props.config.openSearch.enabled && props.openSearchEndpoint ? [
+              { name: 'VECTOR_STORE', value: 'opensearch' },
+              { name: 'OPENSEARCH_HOST', value: props.openSearchEndpoint },
+              { name: 'OPENSEARCH_PORT', value: '443' },
+              { name: 'OPENSEARCH_USER', value: props.config.openSearch.masterUserName || 'admin' },
+              { name: 'OPENSEARCH_PASSWORD', value: opensearchPassword },
+              { name: 'OPENSEARCH_SECURE', value: 'true' },
+            ] : [
+              { name: 'VECTOR_STORE', value: 'weaviate' },
+            ]),
+            
+            // Sandbox配置（API特定）
             { name: 'CODE_EXECUTION_ENDPOINT', value: 'http://dify-sandbox:80' },
             { name: 'CODE_EXECUTION_API_KEY', value: 'dify-sandbox' },
+            { name: 'CODE_EXECUTION_MODE', value: 'api' },
             
-            // Code execution limits
+            // 代码执行限制（API特定）
             { name: 'CODE_MAX_NUMBER', value: '9223372036854775807' },
             { name: 'CODE_MIN_NUMBER', value: '-9223372036854775808' },
             { name: 'CODE_MAX_STRING_LENGTH', value: '80000' },
@@ -329,58 +633,98 @@ export class DifyHelmConstruct extends Construct {
             { name: 'CODE_MAX_NUMBER_ARRAY_LENGTH', value: '1000' },
             { name: 'CODE_MAX_DEPTH', value: '5' },
             
-            // SSRF Proxy configuration (禁用代理，允许直接访问外部API)
+            // Plugin Daemon连接（仅API需要）
+            { name: 'PLUGIN_DAEMON_URL', value: 'http://dify-plugin-daemon:5002' },
+            { name: 'MARKETPLACE_API_URL', value: 'https://marketplace.dify.ai' },
+            { name: 'PLUGIN_DAEMON_KEY', value: props.config.dify.pluginDaemon?.serverKey || 'lYkiYYT6owG+71oLerGzA7GXCgOT++6ovaezWAjpCjf+Sjc3ZtU+qUEi' },
+            { name: 'PLUGIN_DIFY_INNER_API_KEY', value: props.config.dify.pluginDaemon?.difyInnerApiKey || 'QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1' },
+            { name: 'INNER_API_KEY_FOR_PLUGIN', value: props.config.dify.pluginDaemon?.difyInnerApiKey || 'QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1' },
+            { name: 'PLUGIN_DIFY_INNER_API_URL', value: 'http://dify-api-svc:80' },
+            
+            // 网络配置（API特定）
             { name: 'SSRF_PROXY_HTTP_URL', value: '' },
             { name: 'SSRF_PROXY_HTTPS_URL', value: '' },
+            
+            // API监控和性能配置
+            { name: 'API_COMPRESSION_ENABLED', value: 'true' },
+            { name: 'SENTRY_DSN', value: '' },
+            { name: 'SENTRY_TRACES_SAMPLE_RATE', value: '1.0' },
+            { name: 'SENTRY_PROFILES_SAMPLE_RATE', value: '1.0' },
+            
+            // 工作流限制（API特定）
+            { name: 'WORKFLOW_MAX_EXECUTION_TIME', value: '1200' },
+            { name: 'WORKFLOW_CALL_MAX_DEPTH', value: '5' },
+            { name: 'WORKFLOW_CONCURRENT_LIMIT', value: '10' },
+            
+            // 模型配置（API特定）
+            { name: 'DEFAULT_LLM_PROVIDER', value: '' },
+            { name: 'HOSTED_AZURE_OPENAI_ENABLED', value: 'false' },
+            { name: 'HOSTED_ANTHROPIC_ENABLED', value: 'false' },
+            { name: 'CHECK_UPDATE_URL', value: '' },
           ],
-          resources: {
-            limits: { cpu: '2', memory: '2Gi' },
-            requests: { cpu: '1', memory: '1Gi' },
-          },
-          service: {
-            type: useTargetGroupBinding ? 'NodePort' : 'ClusterIP',
-            port: 80,
-          },
         },
         
+        // Worker 配置
         worker: {
           image: {
             repository: `${imageRegistry}langgenius/dify-api`,
           },
           envs: [
-            // Worker 特定的环境变量（如果有需要）
-            // 目前 worker 使用和 API 相同的镜像，大部分配置通过 global.extraBackendEnvs 继承
+            // Worker需要的额外配置（不需要Plugin Daemon和API特定配置）
+            { name: 'EDITION', value: 'SELF_HOSTED' },
+            { name: 'DEPLOY_ENV', value: 'PRODUCTION' },
+            { name: 'STORAGE_TYPE', value: 's3' },
+            
+            // Redis SSL配置（Worker需要）
+            { name: 'REDIS_DB', value: '0' },
+            { name: 'REDIS_USERNAME', value: '' },
+            { name: 'REDIS_PASSWORD', value: '' },
+            { name: 'REDIS_USE_SSL', value: props.config.isChinaRegion ? 'true' : 'false' },
+            { name: 'BROKER_USE_SSL', value: props.config.isChinaRegion ? 'true' : 'false' },
+            
+            // Database URL（Worker需要）
+            { name: 'SQLALCHEMY_DATABASE_URI', value: `postgresql://${props.config.postgresSQL.dbCredentialUsername || 'postgres'}:${dbPassword}@${props.dbEndpoint}:${props.dbPort}/${props.config.postgresSQL.dbName || 'dify'}` },
+            
+            // OpenSearch（如果启用）
+            ...(props.config.openSearch.enabled && props.openSearchEndpoint ? [
+              { name: 'VECTOR_STORE', value: 'opensearch' },
+              { name: 'OPENSEARCH_HOST', value: props.openSearchEndpoint },
+              { name: 'OPENSEARCH_PORT', value: '443' },
+              { name: 'OPENSEARCH_USER', value: props.config.openSearch.masterUserName || 'admin' },
+              { name: 'OPENSEARCH_PASSWORD', value: opensearchPassword },
+              { name: 'OPENSEARCH_SECURE', value: 'true' },
+            ] : [
+              { name: 'VECTOR_STORE', value: 'weaviate' },
+            ]),
+            
+            // Worker不需要以下配置：
+            // - Plugin Daemon配置
+            // - Sandbox配置
+            // - API监控配置
+            // - 代码执行限制
           ],
         },
         
+        // Sandbox 配置
         sandbox: {
           image: {
             repository: `${imageRegistry}langgenius/dify-sandbox`,
             tag: '0.2.10',
           },
           service: {
-            type: useTargetGroupBinding ? 'NodePort' : 'ClusterIP',
+            type: 'NodePort',  // TargetGroupBinding 需要 NodePort
             port: 80,
           },
         },
         
-        redis: {
-          embedded: false,
-        },
-        
-        postgresql: {
-          embedded: false,
-        },
-        
-        minio: {
-          embedded: false,
-        },
-        
-        // Plugin Daemon configuration
+        // Plugin Daemon 配置（默认启用）
         pluginDaemon: {
           enabled: true,
+          image: {
+            repository: `${imageRegistry}langgenius/dify-plugin-daemon`,
+          },
           envs: [
-            // Plugin Daemon 特定的环境变量
+            // Plugin Daemon特定配置
             { name: 'DB_DATABASE', value: 'dify_plugin' },
             { name: 'SERVER_PORT', value: '5002' },
             { name: 'MAX_PLUGIN_PACKAGE_SIZE', value: '52428800' },
@@ -388,100 +732,196 @@ export class DifyHelmConstruct extends Construct {
             { name: 'FORCE_VERIFYING_SIGNATURE', value: 'true' },
             { name: 'PLUGIN_REMOTE_INSTALLING_HOST', value: '0.0.0.0' },
             { name: 'PLUGIN_REMOTE_INSTALLING_PORT', value: '5003' },
+            
+            // Plugin Daemon密钥配置
+            { name: 'SERVER_KEY', value: props.config.dify.pluginDaemon?.serverKey || 'lYkiYYT6owG+71oLerGzA7GXCgOT++6ovaezWAjpCjf+Sjc3ZtU+qUEi' },
+            { name: 'DIFY_INNER_API_KEY', value: props.config.dify.pluginDaemon?.difyInnerApiKey || 'QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1' },
+            { name: 'DIFY_INNER_API_URL', value: 'http://dify-api-svc:80' },
+            
+            // 数据库连接配置（Plugin Daemon需要独立的数据库）
+            { name: 'DB_USERNAME', value: props.config.postgresSQL.dbCredentialUsername || 'postgres' },
+            { name: 'DB_PASSWORD', value: dbPassword },
+            { name: 'DB_HOST', value: props.dbEndpoint },
+            { name: 'DB_PORT', value: props.dbPort },
           ],
         },
+        
+        // 禁用内嵌组件
+        redis: { embedded: false },
+        postgresql: { embedded: false },
+        minio: { embedded: false },
       },
     });
     
-    // Add dependencies
-    difyHelmChart.node.addDependency(ns);
+    // 确保 Helm Chart 在 namespace 之后部署
+    helmChart.node.addDependency(ns);
     
-    // 如果启用了数据库迁移，确保Helm Chart在迁移之后部署
-    if (dbMigration) {
-      difyHelmChart.node.addDependency(dbMigration);
+    // 创建 TargetGroupBinding（默认使用）
+    if (props.alb) {
+      this.createTargetGroupBindings(
+        props.cluster,
+        props.vpc,
+        namespace,
+        props.alb,
+        helmChart
+      );
     }
     
-    // 如果使用 TargetGroupBinding 模式，创建 TargetGroupBinding 资源
-    if (useTargetGroupBinding && props.alb) {
-      console.log('📝 使用 TargetGroupBinding 模式，创建 TargetGroupBinding 资源...');
-      
-      // 创建 API TargetGroupBinding
-      const apiTgb = new eks.KubernetesManifest(this, 'ApiTargetGroupBinding', {
-        cluster: props.cluster,
-        manifest: [{
-          apiVersion: 'elbv2.k8s.aws/v1beta1',
-          kind: 'TargetGroupBinding',
-          metadata: {
-            name: 'dify-api-tgb',
-            namespace,
-          },
-          spec: {
-            networking: {
-              ingress: [{
-                from: [{
-                  ipBlock: {
-                    cidr: props.vpc.vpcCidrBlock,
-                  },
-                }],
-                ports: [{
-                  protocol: 'TCP',
-                }],
+    console.log('✅ Dify Helm 部署配置完成');
+    console.log(`📍 访问 URL: ${baseUrl}`);
+  }
+  
+  /**
+   * 创建数据库迁移
+   */
+  private createDatabaseMigration(
+    props: DifyHelmConstructProps,
+    namespace: string,
+    dbPassword: string,
+    ns: eks.KubernetesManifest
+  ): void {
+    console.log('🔄 配置数据库自动迁移...');
+    
+    // 创建数据库密码 Secret
+    const dbSecretName = 'dify-db-credentials';
+    const dbSecretManifest = new eks.KubernetesManifest(this, 'DbSecret', {
+      cluster: props.cluster,
+      manifest: [{
+        apiVersion: 'v1',
+        kind: 'Secret',
+        metadata: {
+          name: dbSecretName,
+          namespace,
+        },
+        type: 'Opaque',
+        stringData: {
+          'password': dbPassword,
+          'username': props.config.postgresSQL.dbCredentialUsername || 'postgres',
+        },
+      }],
+    });
+    
+    // 确保 Secret 在 namespace 之后创建
+    dbSecretManifest.node.addDependency(ns);
+    
+    const imageRegistry = props.config.isChinaRegion ? GCR_REGISTRY : '';
+    
+    // 创建数据库迁移构造器
+    const dbMigration = new DatabaseMigrationConstruct(this, 'DbMigration', {
+      config: props.config,
+      cluster: props.cluster,
+      namespace,
+      database: {
+        endpoint: props.dbEndpoint,
+        port: props.dbPort,
+        username: props.config.postgresSQL.dbCredentialUsername || 'postgres',
+        secretName: dbSecretName,
+        dbName: props.config.postgresSQL.dbName || 'dify',
+      },
+      serviceAccountName: 'dify',
+      difyVersion: props.config.dify.version || '1.1.0',
+      imageRegistry,
+    });
+    
+    // 确保迁移在 Secret 之后创建
+    dbMigration.node.addDependency(dbSecretManifest);
+    
+    console.log('✅ 数据库迁移配置完成');
+  }
+  
+  /**
+   * 创建 TargetGroupBinding 资源
+   */
+  private createTargetGroupBindings(
+    cluster: eks.ICluster,
+    vpc: IVpc,
+    namespace: string,
+    alb: {
+      apiTargetGroupArn: string;
+      frontendTargetGroupArn: string;
+      dnsName: string;
+      cloudFrontDomain?: string;
+    },
+    helmChart: eks.HelmChart
+  ): void {
+    console.log('📝 创建 TargetGroupBinding 资源...');
+    
+    // API TargetGroupBinding
+    const apiTgb = new eks.KubernetesManifest(this, 'ApiTGB', {
+      cluster,
+      manifest: [{
+        apiVersion: 'elbv2.k8s.aws/v1beta1',
+        kind: 'TargetGroupBinding',
+        metadata: {
+          name: 'dify-api-tgb',
+          namespace,
+        },
+        spec: {
+          networking: {
+            ingress: [{
+              from: [{
+                ipBlock: {
+                  cidr: vpc.vpcCidrBlock,
+                },
               }],
-            },
-            serviceRef: {
-              name: 'dify-api-svc',
-              port: 80,
-            },
-            targetGroupARN: props.alb.apiTargetGroupArn,
-          },
-        }],
-      });
-      
-      // 创建 Frontend TargetGroupBinding
-      const frontendTgb = new eks.KubernetesManifest(this, 'FrontendTargetGroupBinding', {
-        cluster: props.cluster,
-        manifest: [{
-          apiVersion: 'elbv2.k8s.aws/v1beta1',
-          kind: 'TargetGroupBinding',
-          metadata: {
-            name: 'dify-frontend-tgb',
-            namespace,
-          },
-          spec: {
-            networking: {
-              ingress: [{
-                from: [{
-                  ipBlock: {
-                    cidr: props.vpc.vpcCidrBlock,
-                  },
-                }],
-                ports: [{
-                  protocol: 'TCP',
-                }],
+              ports: [{
+                protocol: 'TCP',
               }],
-            },
-            serviceRef: {
-              name: 'dify-frontend',
-              port: 80,
-            },
-            targetGroupARN: props.alb.frontendTargetGroupArn,
+            }],
           },
-        }],
-      });
-      
-      // 确保 TargetGroupBinding 在 Helm Chart 之后创建
-      apiTgb.node.addDependency(difyHelmChart);
-      frontendTgb.node.addDependency(difyHelmChart);
-      
-      console.log('✅ TargetGroupBinding 资源配置完成');
-      console.log(`📝 ALB DNS: ${props.alb.dnsName}`);
-      if (props.alb.cloudFrontDomain) {
-        console.log(`📝 CloudFront Domain: ${props.alb.cloudFrontDomain}`);
-      }
-    } else {
-      console.log('📝 使用传统 Ingress 模式，ALB 将由 AWS Load Balancer Controller 自动管理');
-      console.log(`📝 已配置安全组: ${props.albSecurityGroupId}`);
-      console.log('📝 ALB 将在 Helm 部署完成后自动创建');
+          serviceRef: {
+            name: 'dify-api-svc',
+            port: 80,
+          },
+          targetGroupARN: alb.apiTargetGroupArn,
+        },
+      }],
+    });
+    
+    // Frontend TargetGroupBinding
+    const frontendTgb = new eks.KubernetesManifest(this, 'FrontendTGB', {
+      cluster,
+      manifest: [{
+        apiVersion: 'elbv2.k8s.aws/v1beta1',
+        kind: 'TargetGroupBinding',
+        metadata: {
+          name: 'dify-frontend-tgb',
+          namespace,
+        },
+        spec: {
+          networking: {
+            ingress: [{
+              from: [{
+                ipBlock: {
+                  cidr: vpc.vpcCidrBlock,
+                },
+              }],
+              ports: [{
+                protocol: 'TCP',
+              }],
+            }],
+          },
+          serviceRef: {
+            name: 'dify-frontend',
+            port: 80,
+          },
+          targetGroupARN: alb.frontendTargetGroupArn,
+        },
+      }],
+    });
+    
+    // 确保在 Helm Chart 之后创建
+    apiTgb.node.addDependency(helmChart);
+    frontendTgb.node.addDependency(helmChart);
+    
+    console.log('✅ TargetGroupBinding 资源配置完成');
+    console.log(`📝 ALB DNS: ${alb.dnsName}`);
+    if (alb.cloudFrontDomain) {
+      console.log(`🌐 CloudFront Domain: ${alb.cloudFrontDomain}`);
     }
   }
 }
+
+// 导出便捷的类型别名
+export { DifyHelmConstruct as DifyHelm };
+export { DifyHelmStack as DifyStack };

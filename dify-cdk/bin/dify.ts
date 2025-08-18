@@ -1,24 +1,24 @@
 #!/usr/bin/env node
 /**
- * Dify with TargetGroupBinding Mode
- *
- * 这个部署脚本实现了：
- * 1. 使用 TargetGroupBinding 模式部署 Dify
- * 2. ALB 在 DifyStack 内部创建，DNS 固定
- * 3. 自动注册 Pods 到 Target Groups
- * 4. 支持可选的 CloudFront CDN 集成
+ * 简化的 Dify 部署入口
+ * 
+ * 使用整合的 Stack，包含 ALB + CloudFront + Helm
+ * 主要改进：
+ * 1. 单 Stack 部署，无需跨区域引用
+ * 2. 使用 ConfigMap 管理环境变量
+ * 3. 自动配置前端 URL
+ * 4. 一键部署所有组件
  */
 
 import * as cdk from 'aws-cdk-lib';
-import { DifyHelmStack } from './dify-helm-stack';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import { DifyHelmStack } from '../lib/helm/dify-helm';
 import { S3Stack } from '../lib/S3/s3-stack';
 import { VPCStack } from '../lib/VPC/vpc-stack';
 import { RDSStack } from '../lib/RDS/rds-stack';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { RedisClusterStack } from '../lib/redis/redis-stack';
 import { OpenSearchStack } from '../lib/AOS/aos-stack';
 import { EKSStack } from '../lib/EKS/eks-stack';
-import { DifyCloudFrontStack } from '../lib/cloudfront/dify-cloudfront';
 import { loadConfig } from '../src/config';
 
 const app = new cdk.App();
@@ -28,19 +28,11 @@ try {
   // 1. 加载配置
   const config = loadConfig();
   console.log('✅ 配置加载成功');
-  console.log('🚀 使用 TargetGroupBinding 模式部署 Dify');
+  console.log('🚀 简化架构部署模式 - ALB + CloudFront 在同一 Stack');
   console.log(`📍 部署区域类型: ${config.isChinaRegion ? '中国区域' : '海外区域'}`);
   console.log(`🏗️ VPC模式: ${config.network.useExistingVpc ? '使用现有VPC' : '创建新VPC'}`);
   console.log(`⚙️ EKS模式: ${config.cluster.useExistingCluster ? '使用现有EKS' : '创建新EKS'}`);
-
-  // 从 context 或环境变量获取配置
-  const useTargetGroupBinding = app.node.tryGetContext('useTargetGroupBinding') === 'true' || 
-                               process.env.USE_TARGET_GROUP_BINDING === 'true';
-  const deployCloudFront = app.node.tryGetContext('deployCloudFront') === 'true' || 
-                          process.env.DEPLOY_CLOUDFRONT === 'true';
-
-  console.log(`📦 TargetGroupBinding: ${useTargetGroupBinding ? '启用' : '禁用'}`);
-  console.log(`🌐 CloudFront: ${deployCloudFront ? '启用' : '禁用'}`);
+  console.log(`🌐 CloudFront: ${config.domain.cloudfront?.enabled ? '启用' : '禁用'}`);
 
   // 设置部署环境（区域和账号）
   const env = {
@@ -56,7 +48,9 @@ try {
     config,
     env 
   });
-  const privateSubnets = vpcStack.vpc.selectSubnets({subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS});
+  const privateSubnets = vpcStack.vpc.selectSubnets({
+    subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS
+  });
 
   // 3. 基础设施层
   const s3Stack = new S3Stack(app, 'DifyS3Stack', { 
@@ -86,7 +80,7 @@ try {
     env
   });
 
-  // 4. EKS
+  // 4. EKS 集群
   const eksStack = new EKSStack(app, 'DifyEKSStack', {
     config,
     vpc: vpcStack.vpc,
@@ -94,11 +88,9 @@ try {
     env
   });
 
-  // 5. 应用层 - Helm 部署
-  // DifyHelmStack 会在内部创建 ALB 和 Target Groups
-  console.log('📝 部署 Dify 应用 (TargetGroupBinding 模式)');
-  
-  const difyHelmStack = new DifyHelmStack(app, 'DifyStack', {
+  // 5. 整合的 Dify Stack（包含 ALB + CloudFront + Helm）
+  console.log('📦 配置整合的 Dify Stack...');
+  const difyStack = new DifyHelmStack(app, 'DifyStack', {
     config,
     cluster: eksStack.cluster,
     vpc: vpcStack.vpc,
@@ -129,44 +121,31 @@ try {
     env
   });
 
-  // 6. CloudFront CDN（可选）
-  if (deployCloudFront) {
-    console.log('🌐 CloudFront CDN 配置说明:');
-    console.log('   1. 先部署 DifyStack 创建 ALB');
-    console.log('   2. 获取 ALB DNS 后部署 CloudFrontStack');
-    console.log('   3. 更新 Dify 配置使用 CloudFront 域名');
-  }
-
-  // 7. 设置依赖关系
-  difyHelmStack.addDependency(eksStack);
-  difyHelmStack.addDependency(rdsStack);
-  difyHelmStack.addDependency(redisClusterStack);
-  difyHelmStack.addDependency(s3Stack);
+  // 6. 设置依赖关系
+  difyStack.addDependency(eksStack);
+  difyStack.addDependency(rdsStack);
+  difyStack.addDependency(redisClusterStack);
+  difyStack.addDependency(s3Stack);
   if (config.openSearch.enabled) {
-    difyHelmStack.addDependency(openSearchStack);
+    difyStack.addDependency(openSearchStack);
   }
 
-  // 8. 输出部署信息
+  // 7. 输出部署信息
   console.log('🚀 所有 Stack 配置完成，准备部署...');
   console.log('');
-  console.log('📋 部署步骤:');
+  console.log('📋 简化部署步骤:');
   console.log('1. 部署基础设施: cdk deploy DifyVPCStack DifyS3Stack DifyRDSStack DifyRedisStack DifyOpenSearchStack');
   console.log('2. 部署 EKS 集群: cdk deploy DifyEKSStack');
-  console.log('3. 部署 Dify 应用 (含 ALB): cdk deploy DifyStack');
-  
-  if (deployCloudFront) {
-    console.log('4. 部署 CloudFront: cdk deploy DifyCloudFrontStack --parameters ALBDnsName=<从 DifyStack 输出获取>');
-  }
-  
+  console.log('3. 部署 Dify (包含 ALB + CloudFront): cdk deploy DifyStack');
   console.log('');
-  console.log('✨ 优势:');
-  console.log('   - ALB 在 DifyStack 内部创建，DNS 固定');
-  console.log('   - 使用 TargetGroupBinding 自动管理 Pod 注册');
-  console.log('   - 无需手动更新 DNS 配置');
-  
+  console.log('🔧 或使用一键部署脚本:');
+  console.log('   ./scripts/deploy-simplified.sh');
   console.log('');
-  console.log('🔧 或者使用自动化脚本:');
-  console.log('   ./deploy.sh --region ' + env.region + (deployCloudFront ? ' --with-cloudfront' : ''));
+  console.log('✨ 架构优势:');
+  console.log('   - ALB 和 CloudFront 在同一 Stack，无需 SSM Parameter');
+  console.log('   - 使用 ConfigMap 管理环境变量，避免响应过大');
+  console.log('   - 前端自动配置正确的 URL');
+  console.log('   - 部署流程大幅简化');
 
 } catch (error) {
   console.error('❌ 配置加载失败:', error);
