@@ -21,8 +21,7 @@ import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { Construct } from 'constructs';
 import { SystemConfig } from '../../src/config';
-import { DatabaseMigrationConstruct } from '../database/db-migration-construct';
-import { DifyALBConstruct } from '../alb/dify-alb-construct';
+// 内联整合这些构造器，不再需要外部导入
 
 // GCR Registry for China region
 const GCR_REGISTRY = '048912060910.dkr.ecr.cn-northwest-1.amazonaws.com.cn/dockerhub/';
@@ -84,11 +83,8 @@ export class DifyHelmStack extends cdk.Stack {
 
     // 创建 ALB（默认 TargetGroupBinding 模式始终需要）
     console.log('🔧 创建 ALB 和 Target Groups (TargetGroupBinding 模式)...');
-    const difyAlb = new DifyALBConstruct(this, 'DifyALB', {
-      vpc: props.vpc,
-      config: props.config,
-      albSecurityGroupId: props.albSecurityGroupId,
-    });
+    // 使用内联 ALB 创建逻辑，替代已删除的 DifyALBConstruct
+    const difyAlb = this.createALB(props.vpc, props.config, props.albSecurityGroupId);
     
     const albDnsName = difyAlb.albDnsName;
     this.albDnsName = albDnsName;
@@ -156,49 +152,20 @@ export class DifyHelmStack extends cdk.Stack {
       },
     });
 
-    // 创建缓存策略
-    const apiCachePolicy = new cloudfront.CachePolicy(this, 'ApiCachePolicy', {
-      cachePolicyName: `${this.stackName}-api-cache`,
-      comment: 'Cache policy for API endpoints',
-      defaultTtl: Duration.seconds(0),
-      maxTtl: Duration.seconds(1),
-      minTtl: Duration.seconds(0),
-      enableAcceptEncodingGzip: true,
-      enableAcceptEncodingBrotli: true,
-      queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
-      headerBehavior: cloudfront.CacheHeaderBehavior.allowList(
-        'Authorization',
-        'Content-Type',
-        'X-App-Code'
-      ),
-      cookieBehavior: cloudfront.CacheCookieBehavior.all(),
-    });
+    // 使用预定义的Origin Request Policy - 确保所有Cookie转发到后端
+    const apiOriginRequestPolicy = cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER;
 
-    const staticCachePolicy = new cloudfront.CachePolicy(this, 'StaticCachePolicy', {
-      cachePolicyName: `${this.stackName}-static-cache`,
-      comment: 'Cache policy for static assets',
-      defaultTtl: Duration.days(30),
-      maxTtl: Duration.days(365),
-      minTtl: Duration.days(1),
-      enableAcceptEncodingGzip: true,
-      enableAcceptEncodingBrotli: true,
-      queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
-      headerBehavior: cloudfront.CacheHeaderBehavior.none(),
-      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
-    });
+    // 对于默认路径也使用相同的策略
+    const defaultOriginRequestPolicy = cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER;
 
-    const defaultCachePolicy = new cloudfront.CachePolicy(this, 'DefaultCachePolicy', {
-      cachePolicyName: `${this.stackName}-default-cache`,
-      comment: 'Default cache policy',
-      defaultTtl: Duration.days(1),
-      maxTtl: Duration.days(365),
-      minTtl: Duration.seconds(0),
-      enableAcceptEncodingGzip: true,
-      enableAcceptEncodingBrotli: true,
-      queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
-      headerBehavior: cloudfront.CacheHeaderBehavior.none(),
-      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
-    });
+    // 使用AWS预定义的缓存策略 - 为API请求优化
+    const apiCachePolicy = cloudfront.CachePolicy.CACHING_DISABLED; // 完全禁用缓存，确保每次都请求源站
+
+    // 使用AWS预定义的缓存策略来简化配置
+    const staticCachePolicy = cloudfront.CachePolicy.CACHING_OPTIMIZED;
+
+    // 默认路径也禁用缓存，确保认证请求始终传递到后端
+    const defaultCachePolicy = cloudfront.CachePolicy.CACHING_DISABLED;
 
     // 创建响应头策略
     const responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(this, 'ResponseHeaders', {
@@ -229,7 +196,8 @@ export class DifyHelmStack extends cdk.Stack {
 
     // 创建 CloudFront Distribution
     const distribution = new cloudfront.Distribution(this, 'Distribution', {
-      defaultRootObject: 'index.html',
+      // 移除 defaultRootObject，因为 Dify 不是静态网站
+      // defaultRootObject: 'index.html',
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       enableIpv6: true,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
@@ -243,6 +211,7 @@ export class DifyHelmStack extends cdk.Stack {
         allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
         cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
         cachePolicy: defaultCachePolicy,
+        originRequestPolicy: defaultOriginRequestPolicy, // 添加Origin Request Policy
         responseHeadersPolicy,
         compress: true,
       },
@@ -253,6 +222,7 @@ export class DifyHelmStack extends cdk.Stack {
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachePolicy: apiCachePolicy,
+          originRequestPolicy: apiOriginRequestPolicy, // 关键：添加Origin Request Policy
           responseHeadersPolicy,
           compress: true,
         },
@@ -261,14 +231,25 @@ export class DifyHelmStack extends cdk.Stack {
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachePolicy: apiCachePolicy,
+          originRequestPolicy: apiOriginRequestPolicy, // 关键：添加Origin Request Policy
           responseHeadersPolicy,
           compress: true,
         },
-        '/console/api/*': {
+        '/console/*': {
           origin,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-          cachePolicy: apiCachePolicy,
+          cachePolicy: defaultCachePolicy,
+          originRequestPolicy: defaultOriginRequestPolicy, // 关键：添加Origin Request Policy
+          responseHeadersPolicy,
+          compress: true,
+        },
+        '/app/*': {
+          origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: defaultCachePolicy,
+          originRequestPolicy: defaultOriginRequestPolicy, // 关键：添加Origin Request Policy
           responseHeadersPolicy,
           compress: true,
         },
@@ -277,6 +258,15 @@ export class DifyHelmStack extends cdk.Stack {
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachePolicy: apiCachePolicy,
+          originRequestPolicy: apiOriginRequestPolicy, // 关键：添加Origin Request Policy
+          responseHeadersPolicy,
+          compress: true,
+        },
+        '/_next/*': {
+          origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+          cachePolicy: staticCachePolicy,
           responseHeadersPolicy,
           compress: true,
         },
@@ -288,33 +278,175 @@ export class DifyHelmStack extends cdk.Stack {
           responseHeadersPolicy,
           compress: true,
         },
-        '/_next/static/*': {
-          origin,
-          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
-          cachePolicy: staticCachePolicy,
-          responseHeadersPolicy,
-          compress: true,
-        },
       },
       
-      errorResponses: [
-        {
-          httpStatus: 404,
-          responseHttpStatus: 200,
-          responsePagePath: '/index.html',
-          ttl: Duration.minutes(5),
-        },
-        {
-          httpStatus: 403,
-          responseHttpStatus: 200,
-          responsePagePath: '/index.html',
-          ttl: Duration.minutes(5),
-        },
-      ],
+      // 移除错误响应配置，让 404 正常传递到应用
+      // Dify 应用自己会处理路由
+      errorResponses: [],
     });
 
     return distribution;
+  }
+
+  /**
+   * 创建 ALB 及其 Target Groups
+   * 内联实现，替代已删除的 DifyALBConstruct
+   */
+  private createALB(
+    vpc: ec2.IVpc,
+    config: SystemConfig,
+    albSecurityGroupId?: string
+  ): {
+    apiTargetGroup: cdk.aws_elasticloadbalancingv2.ApplicationTargetGroup;
+    frontendTargetGroup: cdk.aws_elasticloadbalancingv2.ApplicationTargetGroup;
+    albDnsName: string;
+    applicationLoadBalancer: cdk.aws_elasticloadbalancingv2.ApplicationLoadBalancer;
+    listener: cdk.aws_elasticloadbalancingv2.ApplicationListener;
+  } {
+    // 导入必要的模块
+    const { ApplicationLoadBalancer, ApplicationTargetGroup, ApplicationProtocol,
+            ListenerAction, ApplicationListenerRule, ListenerCondition,
+            TargetType } = cdk.aws_elasticloadbalancingv2;
+
+    // 创建或使用现有的安全组
+    let albSecurityGroup: ec2.ISecurityGroup;
+    if (albSecurityGroupId) {
+      albSecurityGroup = ec2.SecurityGroup.fromSecurityGroupId(
+        this,
+        'ExistingSG',
+        albSecurityGroupId
+      );
+    } else {
+      const newSecurityGroup = new ec2.SecurityGroup(this, 'ALBSecurityGroup', {
+        vpc: vpc,
+        allowAllOutbound: true,
+        description: 'Security group for Dify ALB',
+      });
+      
+      // 添加入站规则
+      newSecurityGroup.addIngressRule(
+        ec2.Peer.anyIpv4(),
+        ec2.Port.tcp(80),
+        'Allow HTTP traffic'
+      );
+      
+      albSecurityGroup = newSecurityGroup;
+    }
+
+    // 创建 ALB
+    const applicationLoadBalancer = new ApplicationLoadBalancer(this, 'DifyALB', {
+      vpc: vpc,
+      internetFacing: true,
+      securityGroup: albSecurityGroup as ec2.SecurityGroup,
+    });
+
+    // 创建监听器
+    const listener = applicationLoadBalancer.addListener('Listener', {
+      port: 80,
+      protocol: ApplicationProtocol.HTTP,
+      defaultAction: ListenerAction.fixedResponse(404, {
+        contentType: 'text/plain',
+        messageBody: 'Not Found',
+      }),
+    });
+
+    // 创建 API Target Group
+    const apiTargetGroup = new ApplicationTargetGroup(this, 'ApiTargetGroup', {
+      vpc: vpc,
+      port: 80,
+      protocol: ApplicationProtocol.HTTP,
+      targetType: TargetType.IP,
+      targetGroupName: `${this.stackName}-api-tg`,
+      healthCheck: {
+        enabled: true,
+        path: '/health',
+        healthyHttpCodes: '200',
+        interval: Duration.seconds(30),
+        timeout: Duration.seconds(5),
+        healthyThresholdCount: 2,
+        unhealthyThresholdCount: 3,
+      },
+      deregistrationDelay: Duration.seconds(30),
+    });
+
+    // 创建 Frontend Target Group
+    const frontendTargetGroup = new ApplicationTargetGroup(this, 'FrontendTargetGroup', {
+      vpc: vpc,
+      port: 80,
+      protocol: ApplicationProtocol.HTTP,
+      targetType: TargetType.IP,
+      targetGroupName: `${this.stackName}-frontend-tg`,
+      healthCheck: {
+        enabled: true,
+        path: '/apps',
+        healthyHttpCodes: '200',
+        interval: Duration.seconds(30),
+        timeout: Duration.seconds(5),
+        healthyThresholdCount: 2,
+        unhealthyThresholdCount: 3,
+      },
+      deregistrationDelay: Duration.seconds(30),
+    });
+
+    // 配置路由规则 - Console API
+    new ApplicationListenerRule(this, 'ConsoleApiRule', {
+      listener: listener,
+      priority: 1,
+      conditions: [
+        ListenerCondition.pathPatterns(['/console/api', '/console/api/*'])
+      ],
+      action: ListenerAction.forward([apiTargetGroup]),
+    });
+
+    // 配置路由规则 - API
+    new ApplicationListenerRule(this, 'ApiRule', {
+      listener: listener,
+      priority: 2,
+      conditions: [
+        ListenerCondition.pathPatterns(['/api', '/api/*'])
+      ],
+      action: ListenerAction.forward([apiTargetGroup]),
+    });
+
+    // 配置路由规则 - V1 API
+    new ApplicationListenerRule(this, 'V1Rule', {
+      listener: listener,
+      priority: 3,
+      conditions: [
+        ListenerCondition.pathPatterns(['/v1', '/v1/*'])
+      ],
+      action: ListenerAction.forward([apiTargetGroup]),
+    });
+
+    // 配置路由规则 - Files
+    new ApplicationListenerRule(this, 'FilesRule', {
+      listener: listener,
+      priority: 4,
+      conditions: [
+        ListenerCondition.pathPatterns(['/files', '/files/*'])
+      ],
+      action: ListenerAction.forward([apiTargetGroup]),
+    });
+
+    // 配置路由规则 - Frontend (默认规则)
+    new ApplicationListenerRule(this, 'FrontendRule', {
+      listener: listener,
+      priority: 5,
+      conditions: [
+        ListenerCondition.pathPatterns(['/*'])
+      ],
+      action: ListenerAction.forward([frontendTargetGroup]),
+    });
+
+    const albDnsName = applicationLoadBalancer.loadBalancerDnsName;
+    
+    return {
+      apiTargetGroup,
+      frontendTargetGroup,
+      albDnsName,
+      applicationLoadBalancer,
+      listener
+    };
   }
 
   /**
@@ -518,6 +650,12 @@ export class DifyHelmConstruct extends Construct {
             { name: 'SECRET_KEY', value: secretKey },
             { name: 'LOG_LEVEL', value: 'INFO' },
             
+            // CloudFront/Cookie配置 (4个) - 关键：解决401问题
+            { name: 'SESSION_COOKIE_SECURE', value: props.alb?.cloudFrontDomain ? 'true' : 'false' },
+            { name: 'SESSION_COOKIE_SAMESITE', value: 'Lax' }, // 改为Lax以支持CloudFront
+            { name: 'SESSION_COOKIE_HTTPONLY', value: 'true' },
+            { name: 'WEB_API_CORS_ALLOW_ORIGINS', value: '*' }, // 允许跨域
+            
             // Database (5个)
             { name: 'DB_USERNAME', value: props.config.postgresSQL.dbCredentialUsername || 'postgres' },
             { name: 'DB_PASSWORD', value: dbPassword },
@@ -530,10 +668,8 @@ export class DifyHelmConstruct extends Construct {
             { name: 'REDIS_PORT', value: props.redisPort },
             { name: 'CELERY_BROKER_URL', value: `redis://:@${props.redisEndpoint}:${props.redisPort}/1` },
             
-            // S3 (4个)
-            { name: 'S3_ENDPOINT', value: `https://${props.s3BucketName}.s3.${Aws.REGION}.${s3Domain}` },
+            // S3 (2个) - 减少到2个以腾出空间
             { name: 'S3_BUCKET_NAME', value: props.s3BucketName },
-            { name: 'S3_REGION', value: Aws.REGION },
             { name: 'S3_USE_AWS_MANAGED_IAM', value: 'true' },
           ],
         },
@@ -593,8 +729,23 @@ export class DifyHelmConstruct extends Construct {
             { name: 'DEPLOY_ENV', value: 'PRODUCTION' },
             { name: 'MIGRATION_ENABLED', value: 'true' },
             { name: 'STORAGE_TYPE', value: 's3' },
-            { name: 'CONSOLE_CORS_ALLOW_ORIGINS', value: '*' },
-            { name: 'WEB_API_CORS_ALLOW_ORIGINS', value: '*' },
+            
+            // 增强的CORS和Cookie配置 - 解决401问题
+            { name: 'CONSOLE_CORS_ALLOW_ORIGINS', value: props.alb?.cloudFrontDomain ? `https://${props.alb.cloudFrontDomain},http://${props.alb.dnsName}` : '*' },
+            { name: 'WEB_API_CORS_ALLOW_ORIGINS', value: props.alb?.cloudFrontDomain ? `https://${props.alb.cloudFrontDomain},http://${props.alb.dnsName}` : '*' },
+            // SESSION COOKIE配置 - 这些是解决401问题的关键
+            { name: 'SESSION_COOKIE_SECURE', value: props.alb?.cloudFrontDomain ? 'true' : 'false' },
+            { name: 'SESSION_COOKIE_SAMESITE', value: 'Lax' }, // 改为Lax以支持CloudFront
+            { name: 'SESSION_COOKIE_HTTPONLY', value: 'true' },
+            { name: 'PERMANENT_SESSION_LIFETIME', value: '86400' }, // 24小时session超时
+            
+            // 添加CSRF保护配置
+            { name: 'WTF_CSRF_ENABLED', value: 'false' }, // 临时禁用CSRF以排查问题
+            { name: 'WTF_CSRF_CHECK_DEFAULT', value: 'false' },
+            
+            // S3完整配置（API需要）
+            { name: 'S3_ENDPOINT', value: `https://${props.s3BucketName}.s3.${Aws.REGION}.${s3Domain}` },
+            { name: 'S3_REGION', value: Aws.REGION },
             
             // Redis SSL配置（API需要）
             { name: 'REDIS_DB', value: '0' },
@@ -674,6 +825,18 @@ export class DifyHelmConstruct extends Construct {
             { name: 'EDITION', value: 'SELF_HOSTED' },
             { name: 'DEPLOY_ENV', value: 'PRODUCTION' },
             { name: 'STORAGE_TYPE', value: 's3' },
+            
+            // Cookie配置（Worker也需要）- 这些也是解决401问题的关键
+            { name: 'SESSION_COOKIE_SECURE', value: props.alb?.cloudFrontDomain ? 'true' : 'false' },
+            { name: 'SESSION_COOKIE_SAMESITE', value: 'Lax' }, // Lax设置关键
+            { name: 'SESSION_COOKIE_HTTPONLY', value: 'true' }, // 添加HTTPONLY设置
+            { name: 'PERMANENT_SESSION_LIFETIME', value: '86400' }, // 添加session超时
+            { name: 'WEB_API_CORS_ALLOW_ORIGINS', value: props.alb?.cloudFrontDomain ? `https://${props.alb.cloudFrontDomain},http://${props.alb.dnsName}` : '*' },
+            { name: 'CONSOLE_CORS_ALLOW_ORIGINS', value: props.alb?.cloudFrontDomain ? `https://${props.alb.cloudFrontDomain},http://${props.alb.dnsName}` : '*' },
+            
+            // S3配置（Worker需要）
+            { name: 'S3_ENDPOINT', value: `https://${props.s3BucketName}.s3.${Aws.REGION}.${s3Domain}` },
+            { name: 'S3_REGION', value: Aws.REGION },
             
             // Redis SSL配置（Worker需要）
             { name: 'REDIS_DB', value: '0' },
@@ -806,25 +969,99 @@ export class DifyHelmConstruct extends Construct {
     
     const imageRegistry = props.config.isChinaRegion ? GCR_REGISTRY : '';
     
-    // 创建数据库迁移构造器
-    const dbMigration = new DatabaseMigrationConstruct(this, 'DbMigration', {
-      config: props.config,
+    // 内联创建数据库迁移任务，替代已删除的 DatabaseMigrationConstruct
+    const jobName = `dify-db-migration-${Date.now()}`;
+    
+    // 创建迁移Job
+    const dbMigrationJob = new eks.KubernetesManifest(this, 'DbMigrationJob', {
       cluster: props.cluster,
-      namespace,
-      database: {
-        endpoint: props.dbEndpoint,
-        port: props.dbPort,
-        username: props.config.postgresSQL.dbCredentialUsername || 'postgres',
-        secretName: dbSecretName,
-        dbName: props.config.postgresSQL.dbName || 'dify',
-      },
-      serviceAccountName: 'dify',
-      difyVersion: props.config.dify.version || '1.1.0',
-      imageRegistry,
+      manifest: [{
+        apiVersion: 'batch/v1',
+        kind: 'Job',
+        metadata: {
+          name: jobName,
+          namespace: namespace,
+          labels: {
+            'app': 'dify',
+            'component': 'db-migration',
+          },
+          annotations: {
+            'helm.sh/hook': 'pre-install,pre-upgrade',
+            'helm.sh/hook-weight': '-10',
+            'helm.sh/hook-delete-policy': 'before-hook-creation,hook-succeeded',
+          },
+        },
+        spec: {
+          template: {
+            spec: {
+              serviceAccountName: 'dify',
+              restartPolicy: 'OnFailure',
+              initContainers: [{
+                name: 'wait-for-db',
+                image: 'postgres:16-alpine',
+                command: ['/bin/sh', '-c'],
+                args: [`
+                  until pg_isready -h ${props.dbEndpoint} -p ${props.dbPort} -U ${props.config.postgresSQL.dbCredentialUsername || 'postgres'}; do
+                    echo "Waiting for database..."
+                    sleep 5
+                  done
+                  echo "Database is ready!"
+                `],
+                env: [{
+                  name: 'PGPASSWORD',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: dbSecretName,
+                      key: 'password',
+                    },
+                  },
+                }],
+              }],
+              containers: [{
+                name: 'migration',
+                image: `${imageRegistry}langgenius/dify-api:${props.config.dify.version || '1.1.0'}`,
+                command: ['/bin/bash', '-c'],
+                args: [`
+                  set -e
+                  echo "Starting database migration..."
+                  cd /app/api
+                  source .venv/bin/activate
+                  flask db upgrade
+                  echo "Database migration completed!"
+                `],
+                env: [
+                  { name: 'DB_USERNAME', value: props.config.postgresSQL.dbCredentialUsername || 'postgres' },
+                  { name: 'DB_HOST', value: props.dbEndpoint },
+                  { name: 'DB_PORT', value: props.dbPort },
+                  { name: 'DB_DATABASE', value: props.config.postgresSQL.dbName || 'dify' },
+                  {
+                    name: 'DB_PASSWORD',
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: dbSecretName,
+                        key: 'password',
+                      },
+                    },
+                  },
+                  { name: 'MIGRATION_ENABLED', value: 'false' },
+                  { name: 'PYTHONUNBUFFERED', value: '1' },
+                ],
+                resources: {
+                  limits: { cpu: '1', memory: '2Gi' },
+                  requests: { cpu: '500m', memory: '1Gi' },
+                },
+              }],
+            },
+          },
+          backoffLimit: 3,
+          activeDeadlineSeconds: 600,
+          ttlSecondsAfterFinished: 86400,
+        },
+      }],
     });
     
     // 确保迁移在 Secret 之后创建
-    dbMigration.node.addDependency(dbSecretManifest);
+    dbMigrationJob.node.addDependency(dbSecretManifest);
     
     console.log('✅ 数据库迁移配置完成');
   }
