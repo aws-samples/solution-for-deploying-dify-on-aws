@@ -133,19 +133,7 @@ try {
   // 7. 输出部署信息
   console.log('🚀 所有 Stack 配置完成，准备部署...');
   console.log('');
-  console.log('📋 简化部署步骤:');
-  console.log('1. 部署基础设施: cdk deploy DifyVPCStack DifyS3Stack DifyRDSStack DifyRedisStack DifyOpenSearchStack');
-  console.log('2. 部署 EKS 集群: cdk deploy DifyEKSStack');
-  console.log('3. 部署 Dify (包含 ALB + CloudFront): cdk deploy DifyStack');
   console.log('');
-  console.log('🔧 或使用一键部署脚本:');
-  console.log('   ./scripts/deploy-simplified.sh');
-  console.log('');
-  console.log('✨ 架构优势:');
-  console.log('   - ALB 和 CloudFront 在同一 Stack，无需 SSM Parameter');
-  console.log('   - 使用 ConfigMap 管理环境变量，避免响应过大');
-  console.log('   - 前端自动配置正确的 URL');
-  console.log('   - 部署流程大幅简化');
 
 } catch (error) {
   console.error('❌ 配置加载失败:', error);

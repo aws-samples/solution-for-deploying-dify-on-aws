@@ -40,8 +40,8 @@
         }
       },
       "cachePolicy": {
-        "defaultTTL": 300,
-        "maxTTL": 86400,
+        "defaultTTL": 0,
+        "maxTTL": 60,
         "minTTL": 0
       },
       "logging": {
@@ -56,7 +56,7 @@
   },
   "cluster": {
     "useExistingCluster": false,
-    "clusterName": "dify-eks",
+    "clusterName": "dify-eks-japan",
     "version": "1.33",
     "vpcSubnetIds": [],
     "managedNodeGroups": {
@@ -69,7 +69,7 @@
         "workerNodeSubnetIds": []
       }
     },
-    "eksClusterName": "dify-eks"
+    "eksClusterName": "dify-eks-japan"
   },
   "s3": {
     "removeWhenDestroyed": true,

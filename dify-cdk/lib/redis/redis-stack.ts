@@ -51,7 +51,7 @@ export class RedisClusterStack extends cdk.Stack {
       try {
         // 使用配置中的节点类型或动态获取
         const configuredNodeType = config.redis.nodeType;
-        const cacheNodeType = configuredNodeType || await getAvailableRedisInstanceType(region);
+        const cacheNodeType = configuredNodeType;
         console.log(`Redis节点类型: ${cacheNodeType}`);
 
         // 使用配置参数初始化 Redis 复制组
@@ -97,28 +97,4 @@ export class RedisClusterStack extends cdk.Stack {
 
     initializeRedisReplicationGroup();
   }
-}
-
-export async function getAvailableRedisInstanceType(region: string): Promise<string> {
-  const instanceTypes = ['cache.m7g.large', 'cache.m6g.large', 'cache.m6i.large'];
-  const elasticacheClient = new ElastiCacheClient({ region });
-
-  for (const instanceType of instanceTypes) {
-    const params = {
-      CacheNodeType: instanceType,
-    };
-
-    try {
-      const command = new DescribeReservedCacheNodesOfferingsCommand(params);
-      const result = await elasticacheClient.send(command);
-
-      if (result.ReservedCacheNodesOfferings && result.ReservedCacheNodesOfferings.length > 0) {
-        return instanceType;
-      }
-    } catch (error) {
-      console.error(`Error checking instance type ${instanceType}:`, error);
-    }
-  }
-
-  throw new Error('No suitable Redis instance type found');
 }

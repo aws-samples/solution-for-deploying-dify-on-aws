@@ -167,9 +167,9 @@ export class DifyHelmStack extends cdk.Stack {
     // 默认路径也禁用缓存，确保认证请求始终传递到后端
     const defaultCachePolicy = cloudfront.CachePolicy.CACHING_DISABLED;
 
-    // 创建响应头策略
+    // 创建响应头策略 - 添加区域标识避免全球资源命名冲突
     const responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(this, 'ResponseHeaders', {
-      responseHeadersPolicyName: `${this.stackName}-response-headers`,
+      responseHeadersPolicyName: `${this.stackName}-${Aws.REGION}-response-headers`,
       comment: 'Response headers for Dify',
       securityHeadersBehavior: {
         contentTypeOptions: { override: true },
